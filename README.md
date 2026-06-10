@@ -10,7 +10,7 @@ __ __
 
 <div align="center">
 
-<img width="300" height="300" alt="Screenshot_20260610_105020_X" src="https://github.com/user-attachments/assets/cd965f74-26f6-4265-a734-fb332d55a1f7" />
+<img width="300" height="300" alt="Screenshot_20260610_105020" src="https://github.com/user-attachments/assets/cd965f74-26f6-4265-a734-fb332d55a1f7" />
 
 
 # Gnolly
