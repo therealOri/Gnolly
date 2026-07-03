@@ -1,0 +1,569 @@
+"""
+gnolly.obfuscate
+~~~~~~~~~~~~~~~~
+Multi-pass AST obfuscation pipeline.
+
+  Pass 1  Name collection    — build rename map for safe-to-rename names only
+  Pass 2  Full renaming      — apply rename map (definitions + loads)
+  Pass 3  String encryption  — literals -> bytes.fromhex().decode()
+  Pass 4  Constant encryption — int→XOR, float -> arithmetic, bytes -> hex
+  Pass 5  Import obfuscation — import/from -> __import__+getattr chains
+  Pass 6  Control-flow flat  — state-machine dispatch loop in functions
+  Pass 7  Dead code injection — inert stmts scattered through bodies
+  Pass 8  Docstring removal
+  Pass 9  Polymorphic noise  — unique per-run junk at module top
+
+What is and isn't renamed
+--------------------------
+RENAMED:   module-level functions, classes, local variables
+NOT RENAMED: method names (accessed via .attr -> can't know the type),
+             function parameters (keyword call compatibility),
+             import names/aliases (obfuscated via __import__ instead),
+             __dunder__ names, builtins
+
+Random policy
+--------------
+random.Random(seed) — deterministic structural choices (flatten state values
+                       order, dead-code injection positions) so --seed N gives
+                       reproducible output.
+secrets             — all actual embedded numeric values (XOR keys, state
+                       numbers, noise constants) use crypto-random every run.
+"""
+from __future__ import annotations
+import ast
+import random
+import secrets
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Name generation — I/l/O/0 confusable characters
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CONF = "IlO0"
+
+def _confname(n: int) -> str:
+    """
+    Generate the n-th obfuscated identifier as a fixed-width, 8-digit
+    base-4 number over the confusable alphabet _CONF ("IlO0"), prefixed
+    with "Il". This is a true bijection from n -> name: every non-negative
+    integer below 4**8 (65536) maps to a distinct 10-character identifier.
+
+    IMPORTANT: do NOT use variable-width digits with right-padding (e.g.
+    "Il" + digits.ljust(8, "0")),  that scheme is NOT collision-free,
+    because the pad character ("0") is itself a valid digit in _CONF, so
+    a short representation right-padded with "0" can coincide exactly
+    with a longer representation that happens to end in "0" digits too
+    (e.g. n=0 and n=3 both produced "Il00000000" under an older scheme,
+    silently aliasing two unrelated identifiers onto the same mangled
+    name and corrupting program semantics).
+    Fixed-width left-padding (computing all 8 digit positions every time,
+    most-significant first) avoids this: it's a standard positional
+    numeral system, which is always a bijection over its range.
+    """
+    if n < 0 or n >= 4 ** 8:
+        raise ValueError(
+            f"_confname: index {n} out of range: name pool exhausted "
+            f"(supports up to {4 ** 8} unique identifiers per file)"
+        )
+    digits = []
+    m = n
+    for _ in range(8):
+        digits.append(_CONF[m % 4])
+        m //= 4
+    return "Il" + "".join(reversed(digits))
+
+
+class _NamePool:
+    def __init__(self, seed: int = 0):
+        self._counter = 0
+        self._rng = random.Random(seed)
+        self.map: dict[str, str] = {}
+
+    def get(self, name: str) -> str:
+        if name not in self.map:
+            self.map[name] = _confname(self._counter)
+            self._counter += 1
+        return self.map[name]
+
+    def fresh(self) -> str:
+        n = _confname(self._counter)
+        self._counter += 1
+        return n
+
+
+_PROTECTED = frozenset({
+    "print","range","len","int","str","bytes","bytearray","list","dict",
+    "set","tuple","type","bool","float","complex","object","super",
+    "isinstance","issubclass","hasattr","getattr","setattr","delattr",
+    "open","property","staticmethod","classmethod","repr","hash","id",
+    "iter","next","enumerate","zip","map","filter","sorted","reversed",
+    "min","max","sum","abs","round","divmod","pow","hex","oct","bin",
+    "chr","ord","input","exit","quit","vars","dir","callable","format",
+    "any","all","slice","memoryview","breakpoint","compile","eval","exec",
+    "globals","locals","__import__","__builtins__","__name__","__file__",
+    "__doc__","__package__","__spec__","__all__","__version__","__author__",
+    "Exception","BaseException","ValueError","TypeError","RuntimeError",
+    "KeyError","IndexError","AttributeError","NotImplementedError",
+    "OSError","IOError","FileNotFoundError","PermissionError","ImportError",
+    "ModuleNotFoundError","StopIteration","GeneratorExit","SystemExit",
+    "KeyboardInterrupt","OverflowError","ZeroDivisionError","MemoryError",
+    "RecursionError","UnicodeError","UnicodeDecodeError","UnicodeEncodeError",
+    "AssertionError","NameError","UnboundLocalError","LookupError",
+    "ArithmeticError","BufferError","EOFError","ConnectionError","TimeoutError",
+    "True","False","None","self","cls","args","kwargs",
+    # common param names that appear as keyword args at call sites
+    "key","default","sep","end","file","flush","encoding","errors",
+    "mode","buffering","newline","reverse","iterable","start","stop","step",
+})
+
+def _renameable(name: str) -> bool:
+    return (name not in _PROTECTED
+            and not (name.startswith("__") and name.endswith("__")))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 1 -> Name collection (read-only walk)
+#   Only collect: module-level function names, class names, local variables.
+#   NOT collected: method names (inside class bodies), parameters, imports.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _Collector(ast.NodeVisitor):
+    def __init__(self, pool: _NamePool):
+        self._pool = pool
+        self._in_class = 0   # depth (inside a class body, skip method names)
+
+    def _reg(self, name: str):
+        if _renameable(name):
+            self._pool.get(name)
+
+    def visit_FunctionDef(self, node):
+        # Register function name only if NOT inside a class body
+        if self._in_class == 0:
+            self._reg(node.name)
+        # Always recurse into body (but at class depth 0 for nested functions)
+        self.generic_visit(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node):
+        self._reg(node.name)
+        self._in_class += 1
+        self.generic_visit(node)
+        self._in_class -= 1
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, ast.Store):
+            self._reg(node.id)
+
+    def visit_Import(self, node):
+        pass   # handled via __import__ obfuscation
+
+    def visit_ImportFrom(self, node):
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Passes 3 & 4 -> Constant encryption helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _enc_str(s: str) -> ast.expr:
+    hex_s = s.encode("utf-8").hex()
+    # Polymorphic: alternate between bytes and bytearray
+    use_bytes = secrets.randbelow(2) == 0
+    obj_name  = "bytes" if use_bytes else "bytearray"
+    decode_args = [ast.Constant(value="utf-8")] if use_bytes else []
+    return ast.Call(
+        func=ast.Attribute(
+            value=ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id=obj_name, ctx=ast.Load()),
+                    attr="fromhex", ctx=ast.Load()),
+                args=[ast.Constant(value=hex_s)], keywords=[]),
+            attr="decode", ctx=ast.Load()),
+        args=decode_args, keywords=[])
+
+def _enc_int(n: int) -> ast.expr:
+    k = secrets.randbelow(0xFFFF) + 1
+    return ast.BinOp(
+        left=ast.Constant(value=n ^ k),
+        op=ast.BitXor(),
+        right=ast.Constant(value=k))
+
+def _enc_float(f: float) -> ast.expr:
+    d = (secrets.randbelow(9999) + 1) / 1000.0
+    return ast.BinOp(
+        left=ast.BinOp(
+            left=ast.Constant(value=round(f + d, 10)),
+            op=ast.Sub(),
+            right=ast.Constant(value=d)),
+        op=ast.Add(),
+        right=ast.Constant(value=0.0))
+
+def _enc_bytes(b: bytes) -> ast.expr:
+    return ast.Call(
+        func=ast.Attribute(
+            value=ast.Name(id="bytes", ctx=ast.Load()),
+            attr="fromhex", ctx=ast.Load()),
+        args=[ast.Constant(value=b.hex())], keywords=[])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 5 -> Import obfuscation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _hex_str_node(s: str) -> ast.expr:
+    """bytes.fromhex(hex).decode() -> hides the string literal."""
+    return ast.Call(
+        func=ast.Attribute(
+            value=ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="bytes", ctx=ast.Load()),
+                    attr="fromhex", ctx=ast.Load()),
+                args=[ast.Constant(value=s.encode().hex())], keywords=[]),
+            attr="decode", ctx=ast.Load()),
+        args=[], keywords=[])
+
+def _obf_import(node: ast.Import, pool: _NamePool) -> list[ast.stmt]:
+    stmts = []
+    for alias in node.names:
+        mod  = alias.name
+        bind = alias.asname or mod.split(".")[0]
+        target = pool.map.get(bind, bind)
+        stmts.append(ast.Assign(
+            targets=[ast.Name(id=target, ctx=ast.Store())],
+            value=ast.Call(
+                func=ast.Name(id="__import__", ctx=ast.Load()),
+                args=[_hex_str_node(mod)],
+                keywords=[],
+            ),
+            lineno=node.lineno, col_offset=node.col_offset,
+        ))
+    return stmts
+
+def _obf_import_from(node: ast.ImportFrom, pool: _NamePool) -> list[ast.stmt]:
+    if node.level != 0:           # relative imports: leave alone
+        return [node]
+    if any(a.name == "*" for a in node.names):
+        return [node]
+
+    mod = node.module or ""
+    stmts = []
+    tmp = pool.fresh()
+
+    stmts.append(ast.Assign(
+        targets=[ast.Name(id=tmp, ctx=ast.Store())],
+        value=ast.Call(
+            func=ast.Name(id="__import__", ctx=ast.Load()),
+            args=[_hex_str_node(mod)],
+            keywords=[ast.keyword(arg="fromlist",
+                                  value=ast.List(
+                                      elts=[ast.Constant(value="")],
+                                      ctx=ast.Load()))],
+        ),
+        lineno=node.lineno, col_offset=node.col_offset,
+    ))
+
+    for alias in node.names:
+        attr = alias.name
+        bind = alias.asname or attr
+        target = pool.map.get(bind, bind)
+        stmts.append(ast.Assign(
+            targets=[ast.Name(id=target, ctx=ast.Store())],
+            value=ast.Call(
+                func=ast.Name(id="getattr", ctx=ast.Load()),
+                args=[ast.Name(id=tmp, ctx=ast.Load()), _hex_str_node(attr)],
+                keywords=[],
+            ),
+            lineno=node.lineno, col_offset=node.col_offset,
+        ))
+
+    return stmts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 6 -> Control-flow flattening (state-machine dispatch)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random) -> list[ast.stmt]:
+    """
+    Flatten a function body into a while-True dispatch loop.
+    Skip if body has fewer than 3 stmts or no branching:  not worth it.
+    Also skip if body contains a bare Return in a non-tail position
+    (those get handled naturally since we emit state transitions before them).
+    There is room for improvemnt here.
+    """
+    has_branch = any(isinstance(s, (ast.If, ast.For, ast.While, ast.Try))
+                     for s in body)
+    if not has_branch or len(body) < 3:
+        return body
+
+    sv = pool.fresh()   # state variable name
+    n  = len(body)
+
+    # Crypto-random state values. (non-sequential, harder to read)
+    used: set[int] = set()
+    states: list[int] = []
+    for _ in range(n + 1):
+        while True:
+            s = (secrets.randbelow(0x6FFF) + 0x1000)
+            if s not in used:
+                used.add(s); states.append(s); break
+
+    def _transition(next_st: int) -> ast.Assign:
+        return ast.Assign(
+            targets=[ast.Name(id=sv, ctx=ast.Store())],
+            value=ast.Constant(value=next_st),
+            lineno=1, col_offset=0)
+
+    # Build elif chain
+    root_if: ast.If | None = None
+    last_if: ast.If | None = None
+
+    for i, stmt in enumerate(body):
+        cur_st  = states[i]
+        next_st = states[i + 1]
+        is_last = (i == n - 1)
+
+        # Body of this case
+        case_body: list[ast.stmt] = [stmt]
+
+        # After terminal stmts (return/raise/break/continue) don't add transition
+        if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            pass
+        elif is_last:
+            case_body.append(ast.Break())
+        else:
+            case_body.append(_transition(next_st))
+
+        branch = ast.If(
+            test=ast.Compare(
+                left=ast.Name(id=sv, ctx=ast.Load()),
+                ops=[ast.Eq()],
+                comparators=[ast.Constant(value=cur_st)]),
+            body=case_body,
+            orelse=[])
+
+        if root_if is None:
+            root_if = branch
+            last_if = branch
+        else:
+            last_if.orelse = [branch]   # type: ignore[union-attr]
+            last_if = branch
+
+    init   = ast.Assign(
+        targets=[ast.Name(id=sv, ctx=ast.Store())],
+        value=ast.Constant(value=states[0]),
+        lineno=1, col_offset=0)
+    loop   = ast.While(
+        test=ast.Constant(value=True),
+        body=[root_if],
+        orelse=[])
+
+    return [init, loop]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 7 -> Dead code helpers
+# ─────────────────────────────────────────────────────────────────────────────
+# > Room for improvemnt here
+def _dead() -> ast.stmt:
+    c = secrets.randbelow(4)
+    if c == 0:
+        return ast.While(test=ast.Constant(value=False), body=[ast.Pass()], orelse=[])
+    elif c == 1:
+        return ast.Assert(test=ast.Constant(value=True), msg=None)
+    elif c == 2:
+        a = secrets.randbelow(0xFF)
+        b = secrets.randbelow(0xFF) + 0x100
+        return ast.If(
+            test=ast.Compare(left=ast.Constant(value=a),
+                             ops=[ast.NotEq()],
+                             comparators=[ast.Constant(value=b)]),
+            body=[ast.Pass()], orelse=[])
+    else:
+        return ast.Try(
+            body=[ast.Pass()],
+            handlers=[ast.ExceptHandler(type=None, name=None, body=[ast.Pass()])],
+            orelse=[], finalbody=[])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 9 -> Polymorphic module-level noise
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _noise(pool: _NamePool, count: int) -> list[ast.stmt]:
+    stmts: list[ast.stmt] = []
+    for _ in range(count):
+        tmp = pool.fresh()
+        c   = secrets.randbelow(3)
+        if c == 0:
+            k = secrets.randbelow(0xFFFF) + 1
+            v = secrets.randbelow(0xFFFF)
+            stmts += [
+                ast.Assign(
+                    targets=[ast.Name(id=tmp, ctx=ast.Store())],
+                    value=ast.BinOp(left=ast.Constant(value=v ^ k),
+                                    op=ast.BitXor(),
+                                    right=ast.Constant(value=k)),
+                    lineno=1, col_offset=0),
+                ast.Delete(targets=[ast.Name(id=tmp, ctx=ast.Del())]),
+            ]
+        elif c == 1:
+            stmts.append(ast.Assert(test=ast.Constant(value=True), msg=None))
+        else:
+            stmts.append(ast.If(test=ast.Constant(value=False),
+                                body=[ast.Pass()], orelse=[]))
+    return stmts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main transformer (Passes 2–9)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _Transformer(ast.NodeTransformer):
+    def __init__(self, pool: _NamePool, seed: int,
+                 obf_strings, obf_constants, obf_imports,
+                 inject_dead, flatten_flow):
+        self._pool         = pool
+        self._rng          = random.Random(seed)
+        self._obf_str      = obf_strings
+        self._obf_const    = obf_constants
+        self._obf_imp      = obf_imports
+        self._dead         = inject_dead
+        self._flatten      = flatten_flow
+        self._fstr_depth   = 0
+        self._class_depth  = 0   # track whether we're inside a class
+
+    def _strip_doc(self, body):
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            return body[1:]
+        return body
+
+    def _scatter_dead(self, body):
+        if not self._dead or len(body) < 2:
+            return body
+        out = []
+        for stmt in body:
+            out.append(stmt)
+            if self._rng.random() < 0.35:
+                out.append(_dead())
+        return out
+
+    # Module
+    def visit_Module(self, node):
+        node.body = self._strip_doc(node.body)
+        self.generic_visit(node)
+        cnt = self._rng.randint(2, 5)
+        node.body = _noise(self._pool, cnt) + node.body
+        return node
+
+    # Classes -> increment depth so method names aren't registered
+    def visit_ClassDef(self, node):
+        node.name = self._pool.map.get(node.name, node.name)
+        node.body = self._strip_doc(node.body)
+        self._class_depth += 1
+        self.generic_visit(node)
+        self._class_depth -= 1
+        return node
+
+    # Functions
+    def visit_FunctionDef(self, node):
+        # Only rename if NOT a method (not inside a class body)
+        if self._class_depth == 0:
+            node.name = self._pool.map.get(node.name, node.name)
+        node.body = self._strip_doc(node.body)
+        self.generic_visit(node)
+        if self._flatten:
+            node.body = _flatten(node.body, self._pool, self._rng)
+        node.body = self._scatter_dead(node.body)
+        return node
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    # Names
+    def visit_Name(self, node):
+        node.id = self._pool.map.get(node.id, node.id)
+        return node
+
+    def visit_arg(self, node):
+        return node   # args never renamed
+
+    def visit_Attribute(self, node):
+        node.value = self.visit(node.value)
+        return node   # .attr never renamed
+
+    def visit_Global(self, node):
+        node.names = [self._pool.map.get(n, n) for n in node.names]
+        return node
+
+    def visit_Nonlocal(self, node):
+        node.names = [self._pool.map.get(n, n) for n in node.names]
+        return node
+
+    # Imports
+    def visit_Import(self, node):
+        if not self._obf_imp:
+            return node
+        return _obf_import(node, self._pool)
+
+    def visit_ImportFrom(self, node):
+        if not self._obf_imp:
+            return node
+        return _obf_import_from(node, self._pool)
+
+    # f-strings -> don't touch embedded constants
+    def visit_JoinedStr(self, node):
+        self._fstr_depth += 1
+        self.generic_visit(node)
+        self._fstr_depth -= 1
+        return node
+
+    # Constants
+    def visit_Constant(self, node):
+        if self._fstr_depth > 0:
+            return node
+        v = node.value
+        if isinstance(v, str) and self._obf_str and v:
+            try:    return ast.copy_location(_enc_str(v), node)
+            except: return node
+        if isinstance(v, bool):
+            return node
+        if isinstance(v, int) and self._obf_const and abs(v) <= 0xFFFFFF:
+            return ast.copy_location(_enc_int(v), node)
+        if isinstance(v, float) and self._obf_const and abs(v) < 1e12:
+            return ast.copy_location(_enc_float(v), node)
+        if isinstance(v, bytes) and self._obf_const and v:
+            return ast.copy_location(_enc_bytes(v), node)
+        return node
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def obfuscate_source(
+    source: str,
+    seed: int = 0,
+    obf_strings:   bool = True,
+    obf_constants: bool = True,
+    obf_imports:   bool = True,
+    inject_dead:   bool = True,
+    flatten_flow:  bool = True,
+) -> str:
+    """
+    Apply all obfuscation passes to *source*.  Returns valid Python source
+    that compiles and executes identically to the original.
+    """
+    tree = ast.parse(source)
+
+    pool = _NamePool(seed=seed)
+    _Collector(pool).visit(tree)
+
+    xfm = _Transformer(pool, seed,
+                        obf_strings, obf_constants, obf_imports,
+                        inject_dead, flatten_flow)
+    new_tree = xfm.visit(tree)
+    ast.fix_missing_locations(new_tree)
+    return ast.unparse(new_tree)
