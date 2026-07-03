@@ -2,15 +2,16 @@ Copyright (C) 2026 therealOri
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, version 3. 
+by the Free Software Foundation, version 3.
 Do make sure to give credit where credit is due.
+
 __ __
 
 <br>
 
 <div align="center">
 
-<img width="300" height="300" alt="Screenshot_20260610_105020" src="https://github.com/user-attachments/assets/cd965f74-26f6-4265-a734-fb332d55a1f7" />
+<img width="300" height="300" alt="Gnolly logo" src="https://github.com/user-attachments/assets/cd965f74-26f6-4265-a734-fb332d55a1f7" />
 
 
 # Gnolly
@@ -22,47 +23,55 @@ __ __
 </div>
 
 __ __
-> This readme and documentation is a WIP, more will be added as updates happen, etc.
+
+> This readme and documentation is a WIP, more will be added as updates happen.
 
 <br>
-<br>
 
-Gnolly encrypts, compresses, and obfuscates your Python source so that only someone holding your key can run it. It is a direct free alternative to PyArmor and similar tools. Just, without the paywalls..
+Gnolly encrypts, compresses, and obfuscates your Python source so that only someone holding your key can run it. It is a direct free alternative to PyArmor and similar tools, just without the paywalls, license servers, or activation requirements.
+__ __
 
----
+> [!IMPORTANT]
+> The gnolly VM protection currently supports python 3.12 versions. I will work on supporting 3.13+ at a later time. (or you can help too by making a pull request)
+
 
 <br>
 
 ## What Gnolly does
 
-When you protect a file, Gnolly runs your code through six stages:
+When you protect a file, Gnolly runs your code through five stages:
 
 ```
 your_script.py
     │
-    ├─ [1] AST obfuscation   — name mangling, string hex-encoding,
-    │                          integer XOR expressions, dead-code injection,
-    │                          docstring removal
+    ├─ [1] AST obfuscation      —   name mangling, string hex-encoding,
+    │                               integer XOR expressions, dead-code injection,
+    │                               docstring removal
     │
-    ├─ [2] Bytecode compile  — source → CPython marshal'd code object
-    │                          (no source text survives past this point)
+    ├─ [2] GIR VM translation   —   source -> Gnolly Intermediate Representation
+    │                               (a custom bytecode format; CPython opcodes
+    │                               never exist at runtime)
     │
-    ├─ [3] Compression       — zlib / lzma / bz2, best/smallest result is used
+    ├─ [3] Compression          —   zlib / lzma / bz2, best result is used
     │
-    ├─ [4] Encryption        — AES-256-GCM with PBKDF2-HMAC-SHA256
-    │                          (600,000 iterations, random salt+IV per file)
+    ├─ [4] Encryption           —   AES-256-GCM + PBKDF2-HMAC-SHA256
+    │                               (600,000 iterations, random salt+IV per file)
     │
-    ├─ [5] Custom encoding   — per-file seeded alphabet (unique for every run)
-    │                          + XOR spread layer
-    │
-    └─ [6] Stub generation   — fully obfuscated loader script
+    └─ [5] Stub generation      —   fully obfuscated loader script
               │
-              └─ your_script.gnolly.py   ← distribute this
+              └─ your_script.gnolly.py   <-  distribute this
 ```
 
-The output file is a standalone `.py` that asks for a key before running. No source, no readable bytecode, no embedded key. The compiled C extension (`_gnolly_core.so`) performs all crypto and VM execution in native machine code.
+The output is a standalone `.py` that asks for a key before running. No source text, no readable bytecode, no embedded key. Two compiled C extensions (`_gnolly_core.so` for decryption, `_gnolly_vm.so` for execution) perform all of the work in native machine code. **Both are required at runtime.**
 
----
+### True VM protection
+
+Protected code is never executed by CPython's eval loop (`ceval.c`). It runs entirely inside `_gnolly_vm.pyx`, a full bytecode interpreter implemented in Cython with its own stack machine, frame objects, and dispatch loop. This means:
+
+- `sys.settrace` / `sys.setprofile` fire **zero events** for protected code.
+- `dis`, `uncompyle6`, `decompile3`, and `pycdc` have no foothold, the on-disk format is GIR, not CPython bytecode
+- GIR opcodes are shuffled per-file using a key-derived permutation; two files with identical source produce different binary blobs
+__ __
 
 <br>
 
@@ -71,111 +80,111 @@ The output file is a standalone `.py` that asks for a key before running. No sou
 ### Install
 
 ```bash
-pip install pycryptodome
+pip install pycryptodome cython
 git clone https://github.com/therealOri/Gnolly
-cd gnolly
-pip install -e .
-python setup_core.py build_ext --inplace   # builds _gnolly_core.so
+cd Gnolly
+python setup.py build_ext --inplace   # builds _gnolly_core.so and _gnolly_vm.so
+pip install .
+```
+> Assuming you are in a 3.12 pyenv virtualenv.
+
+Or as a one-liner:
+
+```bash
+pip install pycryptodome cython && python setup.py build_ext --inplace && pip install .
 ```
 
 ### Protect a file
 
 ```bash
-gnolly protect your_script.py your_script.gnolly.py
+gnolly protect your_script.py
 ```
 
-Gnolly prints the hex key and saves it to a `.key` file. **Back this up, you can NOT run the code without the key.**
+Gnolly prints the hex key and saves it to `your_script.gnly.key`. **Back this up, without it, the protected file cannot run.**
+
+```bash
+# Specify an output path explicitly
+gnolly protect your_script.py your_output_file.gnly.py
+
+# Use an existing keyfile
+gnolly protect your_script.py -K my.key
+```
 
 ### Run the protected file
 
 ```bash
 # Option 1: environment variable (recommended for servers and CI)
 export GNOLLY_KEY=<hex key>
-python your_script.gnolly.py
+python your_script.gnly.py
 
 # Option 2: interactive prompt
-python your_script.gnolly.py
-# Gnolly key: ▌<paste_key>
+python your_script.gnly.py
+# Gnolly key: ▌<paste key here>
 ```
 
 ---
 
 <br>
 
-## The .so file, what it is and where it goes
+## The .so files, what they are and where they go
 
-The file `_gnolly_core.cpython-314-x86_64-linux-gnu.so` (name varies by platform and Python version) is a compiled C extension built from `gnolly/_gnolly_core.pyx`. It contains:
+Two compiled C extensions are required for every protected file:
 
-- The AES-256-GCM decryption and PBKDF2 key derivation
-- The opcode unshuffle logic
-- The VM protection layer (trace blackout, monitoring suppression, isolated namespace)
-- A second round of anti-debug checks in native code
+| File | Role |
+|---|---|
+| `_gnolly_core.<suffix>.so` | AES-256-GCM decryption, PBKDF2 key derivation, anti-debug |
+| `_gnolly_vm.<suffix>.so` | GIR interpreter: executes protected code without CPython's eval loop |
 
-Without this file the protected script prints an error and exits. It is **not optional**.
+> Both must be present at runtime. If either is missing, the protected script just exits silently.
 
-### Building the .so
+The suffix encodes the Python version and platform, e.g. `.cpython-312-x86_64-linux-gnu.so`. **You must rebuild for each target platform and Python version.**
+
+<br>
+
+### Building the .so files
 
 ```bash
-cd gnolly
-python setup_core.py build_ext --inplace
+python setup.py build_ext --inplace
 ```
 
-This creates `gnolly/_gnolly_core.<platform-suffix>.so`. The suffix encodes the Python version and architecture (e.g. `.cpython-314-x86_64-linux-gnu.so`). **You must rebuild it for each target platform and Python version you want to support.**
+This creates both `.so` files inside `gnolly/` locally and installs them in your site-packages library.
 
-### Where to place the .so when distributing
+### Where to place the .so files when distributing
 
-Gnolly searches for the `.so` in four locations, tried in this order:
+Gnolly searches for each `.so` in four locations, tried in order:
 
-| Priority | Location | Typical use case |
+| Priority | Location | Typical use |
 |---|---|---|
-| 1 | **Same directory as the `.gnolly.py` file** | Simplest deployment, you just drop both files together |
-| 2 | `./gnolly/` relative to the current working directory | Running from a project root that has gnolly installed locally |
-| 3 | The `gnolly` package directory (via `sys.modules`) | gnolly is installed in the Python environment |
-| 4 | `sys.path` scan for any `gnolly/` subdirectory | Non-standard layouts, virtualenvs, zip imports |
+| 1 | Same directory as the `.gnolly.py` file | Simplest, just drop both files together |
+| 2 | `./gnolly/` relative to current working directory | Running from a project root with gnolly installed locally |
+| 3 | The `gnolly` package directory (via `sys.modules`) | gnolly installed in the Python environment |
+| 4 | `sys.path` scan for any `gnolly/` subdirectory | Non-standard layouts, virtualenvs |
 
-**The simplest deployment** -> put everything in one folder:
-
-```
-my_app/
-├── my_script.gnolly.py
-└── _gnolly_core.cpython-314-x86_64-linux-gnu.so
-```
-
-Then run from anywhere:
-```bash
-python /any/path/to/my_app/my_script.gnolly.py
-```
-
-<br>
-
-**Alternative -> gnolly subdirectory:**
+**Simplest deployment** -> put everything in one folder:
 
 ```
-my_app/
-├── my_script.gnolly.py
-└── gnolly/
-    └── _gnolly_core.cpython-314-x86_64-linux-gnu.so
+your_app/
+├── my_script.gnly.py
+├── _gnolly_core.cpython-312-x86_64-linux-gnu.so
+└── _gnolly_vm.cpython-312-x86_64-linux-gnu.so
 ```
 
-<br>
-
-**Alternative -> gnolly installed in the environment:**
+**Alternativey -> gnolly installed in the environment:**
 
 ```bash
-pip install gnolly          # installs with pre-built .so
-python my_script.gnolly.py  # finds .so via sys.modules
+pip install gnolly          # installs with pre-built .so files
+python my_script.gnolly.py  # finds both .so files via sys.modules
 ```
 
-<br>
-
-### What happens if the .so is not found
+### What happens if a .so file is not found
 
 ```
-Gnolly runtime not found.
-Place _gnolly_core*.so next to this script, or in ./gnolly/, or install gnolly.
+Gnolly runtime (_gnolly_vm) not found.
+Place _gnolly_vm*.so next to this script, or in ./gnolly/, or install gnolly.
+  pip install gnolly
 ```
 
-The process exits with code 1. No decryption is attempted.
+The process exits immediately with code 1. No decryption is attempted and no information about the payload is exposed.
 
 ---
 
@@ -183,23 +192,55 @@ The process exits with code 1. No decryption is attempted.
 
 ## CLI reference
 
+### `gnolly protect`
+
+Protect a single `.py` file.
+
 ```
 gnolly protect <input.py> [output.py] [options]
 
-  -K, --keyfile FILE    Use an existing keyfile instead of generating a new one
-  --no-mangle           Skip name mangling
-  --no-strings          Skip string literal obfuscation
-  --no-dead             Skip dead-code injection
-  --no-numbers          Skip integer obfuscation
-  --seed INT            Fix the RNG seed (makes output reproducible)
-  -v, --verbose         Show pipeline progress
+  -K, --keyfile FILE      Use an existing keyfile instead of generating a new one
+  --no-mangle             Skip AST name mangling
+  --no-strings            Skip string literal hex-encoding
+  --no-dead               Skip dead-code injection
+  --no-numbers            Skip integer XOR obfuscation
+  --bind                  Bind output to THIS machine (uses current fingerprint)
+  --bind-fp HEX           Bind to a specific machine fingerprint (from 'gnolly fingerprint')
+  --seed INT              Fix RNG seed for reproducible output
+  -v, --verbose           Show pipeline progress
+  --verbose-errors        Emit error messages from the stub on failure (dev only)
+```
 
+### `gnolly protect-package`
+
+Protect an entire package directory, recursively.
+
+```
+gnolly protect-package <input_dir> [output_dir] [options]
+
+  --exclude GLOB [...]    Glob patterns to skip (e.g. "tests/*" "*.pyi")
+  (all protect options above also apply)
+```
+
+### `gnolly keygen`
+
+Generate a new key without protecting anything.
+
+```
 gnolly keygen [keyfile] [options]
 
-  --hint TEXT           Description stored in the keyfile
-  --for-file TEXT       Which script this key belongs to (informational)
+  --hint TEXT             Description stored in the keyfile
+  --for-file TEXT         Which script this key belongs to (informational)
+```
 
-gnolly fingerprint      Print a machine fingerprint (for --bind)
+### `gnolly fingerprint`
+
+Print a machine fingerprint for use with `--bind-fp`.
+
+```bash
+gnolly fingerprint
+# prints: 3a7f91bc...
+# Use with: gnolly protect --bind-fp 3a7f91bc... your_script.py
 ```
 
 ---
@@ -212,48 +253,130 @@ gnolly fingerprint      Print a machine fingerprint (for --bind)
 from gnolly import protect, protect_file
 from gnolly.keymanager import generate_key, save_keyfile, key_to_hex
 
+# Generate a key
 key = generate_key()
 save_keyfile(key, "myapp.key", protected_file="myapp.py")
 
-stub_source = protect(source_code, key, verbose=True)
+# Protect from a source string
+stub_source = protect(
+    source_code,
+    key,
+    verbose=True,        # show pipeline stages
+    silent=True,         # stub prints no errors on failure (default)
+)
 with open("myapp.gnolly.py", "w") as f:
     f.write(stub_source)
 
 # Or directly from a file path
-protect_file("myapp.py", "myapp.gnolly.py", key)
+protect_file("myapp.py", "myapp.gnly.py", key)
+```
+
+Full `protect()` signature:
+
+```python
+protect(
+    source: str,
+    password: bytes,
+    *,
+    filename: str = "<gnly>",
+    mangle_names: bool = True,
+    obf_strings: bool = True,
+    inject_dead: bool = True,
+    obf_numbers: bool = True,
+    machine_fingerprint: bytes | None = None,
+    seed: int | None = None,
+    verbose: bool = False,
+    silent: bool = True,
+) -> str
 ```
 
 ---
 
 <br>
 
-## Security design
+## Verifying protection is active
+
+```bash
+python -m gnolly.verify
+```
+
+This runs 11 checks and confirms:
+
+- Both `.so` files are compiled native code
+- The GIR translation/serialization round-trips correctly
+- GIR opcode shuffles are unique per key (same source -> different blobs)
+- No `marshal` calls in the VM pipeline (custom binary only)
+- `sys.settrace` fires **zero events** for protected code -> CPython's eval loop never touches it
+- `dis` and `marshal` cannot decode the GIR blob (it is not CPython bytecode)
+- End-to-end protection of a non-trivial module works correctly
+- Generators execute correctly inside the GIR VM
+
+Expected output ends with: `Result: PASS -> VM protection is ACTIVE`
+
+---
+
+<br>
+
+## Machine binding
+
+Bind a protected file so it only decrypts on a specific machine:
+
+```bash
+# Bind to the current machine
+gnolly protect --bind your_script.py
+
+# Bind to a different machine (get its fingerprint first)
+gnolly fingerprint                                    # run on target machine
+gnolly protect --bind-fp <hex> your_script.py        # run on build machine
+```
+
+The machine fingerprint is folded into the PBKDF2 key derivation. On the wrong machine, AES-GCM authentication fails silently, the protected file exits with code 1 and no information is disclosed.
+
+---
+
+<br>
+
+## Security & Design
 
 | Property | How Gnolly achieves it |
 |---|---|
-| No source in output | Source is compiled to bytecode before encryption; never written to disk |
+| No source in output | Source is compiled to GIR before encryption; plaintext never written to disk |
 | No key in output | Key is always external -> env var or interactive prompt |
-| Tamper detection | AES-GCM authentication tag; SHA-256 hash of `.so` baked into stub |
-| Unique per-file encoding | Alphabet seeded from `key + seed`; same source produces different output each run |
-| No `exec(string)` | Stub executes a marshalled code object, not a string |
-| Strong KDF | PBKDF2-HMAC-SHA256, 600,000 iterations (OWASP 2024 recommendation) |
-| No `__import__` in stub | All imports routed through an obfuscated `__builtins__` alias; `__import__` does not appear as a string anywhere in the generated file |
-| No external network calls | Protected file is fully self-contained |
-| Machine binding | `--bind` folds a machine fingerprint into the KDF -> wrong machine, wrong key, GCM auth fails silently |
-| Obfuscated `.so` loading | The C extension is loaded by file path under a random fake module name; `gnolly` and `_gnolly_core` are not visible in the stub |
-| Anti-debug (Python layer) | Trace/profile hooks, known debugger modules, and timing gates checked before any crypto work begins |
-| Anti-debug (C layer) | A second independent sweep runs inside the compiled `.so` after the stub's checks, catching any hooks installed in between |
-| VM protection | Code executes inside `gnolly_exec_vm()` in the C extension: `sys.settrace` is suspended, `sys.monitoring` events are suppressed, and user code runs in an isolated namespace -> Python-level debuggers cannot single-step into protected code |
+| Tamper detection | AES-256-GCM authentication tag; SHA-256 hash of both `.so` files baked into stub |
+| Unique per-file encoding | GIR opcode shuffle keyed per file; same source -> different binary blob every run |
+| No CPython eval loop | Protected code runs in `_gnolly_vm`'s own Cython stack machine, never via `ceval.c` |
+| No `marshal` | GIR is a custom binary format; `marshal.loads` is never called |
+| `sys.settrace` blocked | VM execution produces zero trace events -> Python-level debuggers cannot single-step |
+| `sys.monitoring` suppressed | 3.12+ monitoring events suppressed around decrypt and dispatch |
+| Strong KDF | PBKDF2-HMAC-SHA256, 600,000 iterations (OWASP 2024 recommendation for SHA-256) |
+| No `__import__` in stub | All imports routed through an obfuscated `__builtins__` alias |
+| No external network calls | Protected file is fully self-contained; no phone-home, no activation |
+| Machine binding | `--bind` folds a hardware fingerprint into the KDF — wrong machine -> wrong key -> GCM auth fails |
+| Obfuscated `.so` loading | Extensions are loaded by file path under a random fake module name; `gnolly` and `_gnolly_core` do not appear as strings in the stub |
+| Anti-debug (Python layer) | Trace/profile hooks, known debugger modules, and timing gates checked before any crypto work |
+| Anti-debug (C layer) | A second independent sweep runs inside the compiled `.so` after the stub's checks |
 
 ### What Gnolly does NOT do
 
-- **Gnolly is not DRM.** A determined adversary with enough time and if they have your key, can reconstruct the original logic by instrumenting the Python runtime at the C level. Code protection raises the cost and effort of reverse engineering; it does not make it theoretically impossible.
-- Gnolly does not protect against someone who has both the key and a C-level debugger (e.g. gdb attached to the Python process). Yet..
-- Gnolly does not prevent inspection of process memory at runtime. Yet..
+- **Gnolly is not DRM.** A determined adversary with your key and a C-level debugger (e.g. gdb attached to the Python process) can reconstruct logic by instrumenting the runtime at the C level. Code protection raises the cost and effort of reverse engineering; it does not make it theoretically impossible. 
+- Gnolly does not prevent inspection of process memory at runtime. (yet)
+- Gnolly does not enforce expiry dates, seat counts, or call home.
+> I plan on improving anti-debug and anti-tamper as well as general security hardening eventually. At this point, I can only make things harder :).
 
-For maximum protection, combine Gnolly with Cython compilation or Nuitka for the most sensitive modules.
+<br>
 
----
+### Known limitations
+> What I plan on fixing eventually.
+
+| Construct | Status |
+|---|---|
+| `match` / `case` statements | The numeric obfuscation pass rewrites integer literals inside `case` patterns, producing invalid syntax. Avoid `match` in protected files for now. |
+| `except*` / exception groups | `CHECK_EG_MATCH` is not yet in the GIR ISA. Not supported. |
+| Zero-arg `super()` | `LOAD_SUPER_ATTR` is not yet supported. Use `super(ClassName, self)` as a workaround. |
+| Floating-point constants | The numeric obfuscator decomposes floats (e.g. `0.5` -> `9.668 - 9.168`) with fresh randomness per run; results are correct to ~14 significant figures but the last 2–4 bits may differ from the original due to floating-point rounding across reconstructed expressions. |
+
+Everything else such as: functions, classes, closures, decorators, generators, `async`/`await`, async generators, context managers, comprehensions, exceptions, `*args`/`**kwargs`, multiple inheritance, and walrus operator are supported currenly.
+__ __
 
 <br>
 
@@ -261,73 +384,82 @@ For maximum protection, combine Gnolly with Cython compilation or Nuitka for the
 
 | | **Gnolly** | **PyArmor** | **Cython** | **Nuitka** | **PyInstaller** |
 |---|---|---|---|---|---|
-| **Price** | Free, open-source | Free tier limited; Pro ~$100 | Free | Free (Community) / €299 Commercial | Free |
-| **Encryption** | AES-256-GCM | XOR-based (older); AES in some modes | None | None | None |
-| **KDF** | PBKDF2-HMAC-SHA256, 600k rounds | Varies by version | — | — | — |
-| **VM protection** | ✅ (trace/monitoring blackout, isolated namespace) | ✅ Pro only (`--advanced 2`) | ❌ | ❌ | ❌ |
+| **Price** | Free, open-source | Free tier limited; Pro ~$100 | Free | Free / €299 Commercial | Free |
+| **Encryption** | AES-256-GCM | Varies by version | None | None | None |
+| **KDF** | PBKDF2-HMAC-SHA256, 600k rounds | Varies | — | — | — |
+| **True VM (not CPython eval)** | ✅ | ✅ Pro only | ❌ | ❌ | ❌ |
 | **Anti-debug** | ✅ Python + C layer | ✅ | ❌ | ❌ | ❌ |
-| **Requires .so at runtime** | ✅ | ✅ | ✅ | ❌ (standalone binary) | ❌ (bundles runtime) |
-| **Source hidden** | ✅ | ✅ | Partial (C source visible) | ✅ | ❌ (`.pyc` recoverable) |
+| **sys.settrace fires 0 events** | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **dis / decompilers blocked** | ✅ (custom GIR format) | ✅ | ❌ | ❌ | ❌ |
+| **Requires .so at runtime** | ✅ (2 files) | ✅ | ✅ | ❌ (standalone) | ❌ (bundles runtime) |
+| **Source hidden** | ✅ | ✅ | Partial | ✅ | ❌ (.pyc recoverable) |
 | **No `__import__` in output** | ✅ | ❌ | — | — | — |
-| **Per-file licensing** | ❌ None | ⚠️ Newer versions: yes | ❌ None | ❌ None | ❌ None |
-| **License server / phone-home** | ❌ Never | ⚠️ Activation required | ❌ | ❌ | ❌ |
+| **Per-file licensing / expiry** | ❌ | ✅ (newer versions) | ❌ | ❌ | ❌ |
+| **License server / phone-home** | ❌ Never | ✅ Activation required | ❌ | ❌ | ❌ |
 | **Open source** | ✅ AGPLv3 | ❌ | ✅ Apache 2 | ✅ Apache 2 | ✅ MIT |
-| **Output is a .py file** | ✅ | ✅ | ❌ (.so) | ❌ (.exe or .so) | ❌ (bundle) |
+| **Output is a .py file** | ✅ | ✅ | ❌ (.so) | ❌ | ❌ |
 | **Machine binding** | ✅ | ✅ Pro | ❌ | ❌ | ❌ |
 | **Tamper detection** | ✅ GCM tag + SHA-256 .so hash | ✅ | ❌ | ❌ | ❌ |
 
 ### Key differences
 
-**vs. PyArmor** -> PyArmor is the industry standard for Python obfuscation. Its VM mode (`--advanced 2`) is strong but requires a paid Pro license. Newer versions enforce per-machine and per-file activation via a license server. Gnolly matches its protection level for free, with no activation, no phone-home, and AES-256-GCM instead of PyArmor's older XOR-based schemes.
-
-**vs. Cython** -> Cython compiles Python to a C extension but the `.so` is fairly reversible with tools like `pycdc`. It provides no encryption and no runtime key requirement. Gnolly provides much stronger protection for scripts that don't need to be compiled to C.
-
-**vs. Nuitka** -> Nuitka produces a standalone native binary (no Python required to run), which is excellent against casual reversal. However it is not designed for IP protection specifically, the compiled binary can be disassembled. The Commercial edition adds some obfuscation. Nuitka is the right choice when you want a self-contained executable; Gnolly is the right choice when you want a `.py` file that runs on any Python installation with a key.
-
-**vs. PyInstaller** -> PyInstaller bundles your script and the Python runtime into a single archive. It provides essentially no protection, the original `.pyc` files are trivially extractable. It is a packaging tool, not a protection tool.
-
----
+**vs. PyArmor** -> PyArmor is an industry standard for Python obfuscation. Its VM mode (`--advanced 2`) is strong but requires a paid Pro license, per-machine activation, and a connection to PyArmor's license server. Newer versions enforce seat limits and can remotely revoke licenses. Gnolly matches PyArmor's protection level for free, with no activation, no phone-home, and AES-256-GCM (authenticated encryption) rather than PyArmor's older schemes. 
+> (Because it is close source idk if what I have is actually better or not, but it does work.)
 
 <br>
 
-## Running the tests
+**vs. Cython** -> Cython compiles Python to a C extension but the `.so` is fairly reversible with tools like `pycdc`. It provides no encryption and no runtime key requirement. Gnolly provides much stronger protection for scripts that don't need to be compiled to native C.
+
+**vs. Nuitka** -> Nuitka produces a standalone native binary (no Python required to run). The compiled binary can be disassembled; it is a packaging and performance tool rather than an IP-protection tool. The right choice when you want a self-contained executable; Gnolly is the right choice when you want a `.py` file that runs on any Python installation with a key. 
+> (Use both for a best of both worlds option.)
+
+<br>
+
+**vs. PyInstaller** -> PyInstaller bundles your script and runtime into a single archive. It provides essentially no protection and the original `.pyc` files are trivially extractable. It is a packaging tool, not a protection tool.
+__ __
+
+<br>
+
+## Running tests
 
 ```bash
-pip install pytest | If not installed
+pip install pytest
 python -m pytest tests/ -v
 ```
-
----
+__ __
 
 <br>
 
 ## Project structure
 
 ```
-gnolly/
+Gnolly_Main/
 ├── gnolly/
-│   ├── __init__.py           — public API
+│   ├── __init__.py           — public API (protect, protect_file)
+│   ├── __main__.py           — python -m gnolly entry point
 │   ├── cli.py                — command-line interface
 │   ├── pipeline.py           — orchestrates all protection stages
-│   ├── obfuscate.py          — AST transformer
-│   ├── bytecode.py           — compile → marshal
+│   ├── obfuscate.py          — AST transformer (name mangling, dead code, etc.)
+│   ├── vm_translate.py       — CPython bytecode -> GIR translation
+│   ├── vm_isa.py             — GIR instruction set definition and opcode shuffle
+│   ├── vm_serialize.py       — GIR serialization/deserialization
+│   ├── vm_pipeline.py        — GIR opcode shuffle + blob production
 │   ├── compress.py           — zlib/lzma/bz2 with auto-select
 │   ├── crypto.py             — AES-256-GCM + PBKDF2
 │   ├── encoding.py           — custom seeded-alphabet codec
 │   ├── stub.py               — generates the obfuscated loader script
 │   ├── import_hook.py        — generates .so search and load code
-│   ├── antidebug.py          — generates anti-debug check code
+│   ├── binding.py            — machine fingerprinting for --bind
 │   ├── keymanager.py         — key generation, save, load
-│   ├── _gnolly_core.pyx      — Cython source: crypto, unshuffle, VM layer
-│   └── _gnolly_core.*.so     — compiled C extension (build with setup_core.py)
+│   ├── verify.py             — python -m gnolly.verify self-test
+│   ├── _gnolly_core.pyx      — Cython: AES-256-GCM decrypt, PBKDF2, anti-debug
+│   ├── _gnolly_vm.pyx        — Cython: GIR interpreter (full stack machine)
+│   └── _gnolly_{core,vm}.*.so — compiled C extensions (build with setup.py)
 ├── examples/
 │   └── sample.py
 ├── tests/
 │   └── test_gnolly.py
-├── setup.py
-├── setup_core.py             — builds the .so
+├── setup.py                  — builds both .so files (use this)
 └── README.md
 ```
-
----
-
+__ __
