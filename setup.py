@@ -1,9 +1,9 @@
 """
-setup.py — Gnolly package build
+setup.py - Gnolly package build
 
 Builds both Cython extensions:
-  gnolly._gnolly_core   — AES-GCM decrypt + anti-debug runtime
-  gnolly._gnolly_vm     — GIR (Gnolly Instruction Set) interpreter
+  gnolly._gnolly_core   - AES-GCM decrypt + anti-debug runtime
+  gnolly._gnolly_vm     - GIR (Gnolly Instruction Set) interpreter
 
 Both extensions are mandatory for protected files to run.
 """
@@ -73,7 +73,7 @@ else:
 setup(
     name="gnolly",
     version="1.0.0",
-    description="Professional Python code protection. Free, with no paywalls.",
+    description="Professional Python code protection. Free, and with no paywalls.",
     packages=find_packages(),
     ext_modules=ext_modules,
     python_requires=">=3.11",
