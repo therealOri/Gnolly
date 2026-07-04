@@ -52,6 +52,7 @@ def generate_antidebug_lines(
     str_key: bytes,  # str encoding key
     obn,             # obf_int callable
     imp_fn: str = "__import__",
+    h_blt: str | None = None,  # builtins module handle -> obfuscates None/True/False
 ) -> list[str]:
     """
     Return a list of Python source lines (strings) to emit in the stub,
@@ -70,6 +71,14 @@ def generate_antidebug_lines(
     def s(text: str) -> str:
         return f"{s_fn}({enc(text)})"
 
+    def sing(name: str) -> str:
+        """getattr(builtins_handle, '<None|True|False>') -> falls back to
+        the bare literal only if the caller didn't wire up h_blt (keeps
+        this function usable standalone/in tests)."""
+        if h_blt is None:
+            return name
+        return f"getattr({h_blt}, {s(name)})"
+
     # Temp var names, using secrets for unpredictable suffixes
     _v = lambda: '_' + secrets.token_hex(4)
     vt  = _v()   # trace result
@@ -83,13 +92,13 @@ def generate_antidebug_lines(
 
     # ── Check 1: trace hook ───────────────────────────────────────────────────
     a(f"{vt} = getattr({h_sys}, {s('gettrace')})()")
-    a(f"if {vt} is not None: {exit_call}")
-    a(f"vt = None")
+    a(f"if {vt} is not {sing('None')}: {exit_call}")
+    a(f"vt = {sing('None')}")
 
     # ── Check 2: profile hook ─────────────────────────────────────────────────
     a(f"{vp} = getattr({h_sys}, {s('getprofile')})()")
-    a(f"if {vp} is not None: {exit_call}")
-    a(f"vp = None")
+    a(f"if {vp} is not {sing('None')}: {exit_call}")
+    a(f"vp = {sing('None')}")
 
     # ── Check 3: known debug modules in sys.modules ───────────────────────────
     a(f"{vm} = getattr({h_sys}, {s('modules')})")
@@ -101,11 +110,11 @@ def generate_antidebug_lines(
     # Set a no-op trace, then immediately clear. If gettrace() still returns
     # something after clearing, the trace mechanism has been intercepted.
     a(f"try:")
-    a(f"    getattr({h_sys}, {s('settrace')})(lambda *_: None)")
-    a(f"    getattr({h_sys}, {s('settrace')})(None)")
+    a(f"    getattr({h_sys}, {s('settrace')})(lambda *_: {sing('None')})")
+    a(f"    getattr({h_sys}, {s('settrace')})({sing('None')})")
     a(f"    {vt} = getattr({h_sys}, {s('gettrace')})()")
-    a(f"    if {vt} is not None: {exit_call}")
-    a(f"    vt = None")
+    a(f"    if {vt} is not {sing('None')}: {exit_call}")
+    a(f"    vt = {sing('None')}")
     a(f"except Exception: {exit_call}")
 
     # ── Check 5: timing gate ──────────────────────────────────────────────────
@@ -121,9 +130,9 @@ def generate_antidebug_lines(
     # Legitimate scripts either have None or a standard loader.
     a(f"try:")
     a(f"    {vmod} = __spec__")
-    a(f"    if {vmod} is not None:")
-    a(f"        {vt} = getattr({vmod}, {s('loader')}, None)")
-    a(f"        if {vt} is not None:")
+    a(f"    if {vmod} is not {sing('None')}:")
+    a(f"        {vt} = getattr({vmod}, {s('loader')}, {sing('None')})")
+    a(f"        if {vt} is not {sing('None')}:")
     a(f"            {vp} = type({vt}).__name__")
     a(f"            if any(x in {vp} for x in [{s('Debug')}, {s('Inject')}, {s('Hook')}]):")
     a(f"                {exit_call}")
