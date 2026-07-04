@@ -4,7 +4,7 @@ gnolly.stub
 Generates the maximally obfuscated bootstrap loader.
 
 Stub hardening layers:
-  1. Unicode confusable identifiers  (Cyrillic look-alikes mixed with IlO0) | I want to update this
+  1. Confusable identifiers              (see gnolly.namegen)
   2. Custom XOR-int string encoding  (no fromhex/decode pattern anywhere)
   3. code blob splitting          (4-11 random-length chunks)
   4. __import__ obfuscation          (no plain import statements)
@@ -25,71 +25,16 @@ import struct
 from .antidebug import generate_antidebug_lines, generate_timing_check_lines
 from .binding_stub import generate_binding_lines
 from .import_hook  import generate_import_hook_lines, get_core_so_hash, get_vm_so_hash
+from .namegen import random_confusable_name
 
 
-# ---------------------------------------------------------------------------
-# Confusable character tables
-# ---------------------------------------------------------------------------
-_LATIN_TO_CONFUSE = {
-    'a': '\u0430', 'e': '\u0435', 'o': '\u043e', 'c': '\u0441',
-    'x': '\u0445', 'i': '\u0456', 'p': '\u0440',
-    'A': '\u0410', 'I': '\u0406', 'O': '\u041e', 'C': '\u0421',
-    'X': '\u0425', 'B': '\u0412', 'E': '\u0415', 'K': '\u041a',
-    'M': '\u041c', 'H': '\u041d', 'T': '\u0422', 'P': '\u0420',
-}
-
-def _confuse(name: str, rng: random.Random) -> str:
-    """Fully substitute all eligible Latin chars with Cyrillic look-alikes."""
-    return ''.join(_LATIN_TO_CONFUSE.get(ch, ch) for ch in name)
-
-
-# ---------------------------------------------------------------------------
-# Name generation
-# ---------------------------------------------------------------------------
-_CONF = "IlO0"
-
-def _iloo_name(n: int) -> str:
-    if n == 0:
-        return "Il" + "0" * 9
-    digits = []
-    while n:
-        digits.append(_CONF[n % 4])
-        n //= 4
-    return "Il" + "".join(reversed(digits)).ljust(9, "0")
-
-_WORD_TEMPLATES = [
-    # Nonsense words -> look like identifiers, mean nothing when decoded.
-    # All contain at least one letter eligible for Cyrillic substitution.
-    "grelmo", "vantix", "prexon", "bloric", "snavel", "crumpt",
-    "flebon", "graxen", "plonic", "brixel", "stofan", "drecon",
-    "wablen", "flipox", "craven", "stonex", "bropel", "gloric",
-    "traxen", "pwoble", "snecon", "blaxor", "frenic", "grople",
-    "crenob", "stelox", "bravon", "plotex", "clored", "wraxen",
-    "flobel", "grenic", "snorex", "brolic", "plotan", "crenox",
-    "telbor", "vranic", "glopex", "snorbl", "craxen", "plotix",
-    "blenor", "stovic", "graxol", "frenic", "clopex", "blorvix",
-]
 
 def _gen_names(count: int, seed: int) -> list:
     rng = random.Random(seed)
-    names = []
     used: set = set()
-    iloo_base = rng.randint(10000, 99999)
-    for i in range(count // 2):
-        n = _iloo_name(iloo_base + i)
-        names.append(n); used.add(n)
-    templates = list(_WORD_TEMPLATES)
-    rng.shuffle(templates)
-    t_idx = 0
-    while len(names) < count:
-        base = templates[t_idx % len(templates)]; t_idx += 1
-        name = _confuse(base, rng)
-        suffix = 0; candidate = name
-        while candidate in used:
-            suffix += 1; candidate = name + str(suffix)
-        names.append(candidate); used.add(candidate)
+    names = [random_confusable_name(rng, used, length=11) for _ in range(count)]
     rng.shuffle(names)
-    return names[:count]
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +144,7 @@ def generate_stub(
     # Module handles
     h_sys    = N[2];  h_marshal = N[3];  h_hash   = N[4]
     h_zlib   = N[5];  h_lzma    = N[6];  h_bz2    = N[7]
+    h_blt    = N[131]  # builtins module handle -> used to obfuscate None/True/False
     h_os     = N[8];  h_aes_cls = N[9];  h_struct = N[10]
 
     # State machine vars
@@ -251,7 +197,15 @@ def generate_stub(
     # literal string __import__ never appears in the generated stub output.
     _imp_enc = _enc_str('__import__', str_key)
     a(f"{imp_fn} = getattr(__builtins__, {s_fn}({_imp_enc})) if not isinstance(__builtins__, dict) else __builtins__[{s_fn}({_imp_enc})]")
+    a(f"{h_blt} = {imp_fn}({s_fn}({_enc_str('builtins', str_key)}))")
     a("")
+
+    def sing(name: str) -> str:
+        """getattr(builtins_handle, '<None|True|False>') -> hides the bare
+        keyword constant the same way every other identifier/string in the
+        stub is hidden, instead of leaving it as plaintext just because it
+        looks like scaffolding rather than payload."""
+        return f"getattr({h_blt}, {s_fn}({_enc_str(name, str_key)}))"
 
     # ── Imports ───────────────────────────────────────────────────────────────
     a(_obf_import("sys",     h_sys,    s_fn, str_key, imp_fn))
@@ -273,7 +227,7 @@ def generate_stub(
         a(f"{cvar} = {repr(chunk)}")
     a(f"{sm_blob} = {' + '.join(used_cvars)}")
     for cvar in used_cvars:
-        a(f"{cvar} = None")
+        a(f"{cvar} = " + sing("None"))
     a("")
 
     # ── XOR spread (inline lambda) ────────────────────────────────────────────
@@ -310,8 +264,8 @@ def generate_stub(
     a(f"    try:")
     a(f"        {v[14]} = {imp_fn}({s_fn}({_enc_str('opcode', str_key)}))")
     a(f"        {v[15]} = getattr({v[14]}, {s_fn}({_enc_str('_inline_cache_entries', str_key)}))")
-    a(f"        {v[16]} = True")
-    a(f"    except Exception: {v[15]} = []; {v[16]} = False")
+    a(f"        {v[16]} = " + sing("True"))
+    a(f"    except Exception: {v[15]} = []; {v[16]} = " + sing("False"))
     a(f"    {v[17]} = {{_i: {v[12]}[_i] for _i in range({obn(256)})}}")
     a(f"    {v[18]} = []")
     a(f"    for {v[19]} in range(0, len({v[13]}), {obn(8)}):")
@@ -379,7 +333,7 @@ def generate_stub(
     # Variable for Cython core handle
     cr_var = N[48]
 
-    a(f"{sm_data} = {sm_key} = None")
+    a(f"{sm_data} = {sm_key} = " + sing("None"))
     a(_junk_assign(sm_tmp))
     a("")
 
@@ -387,14 +341,14 @@ def generate_stub(
     _ad_lines, _timing_var = generate_antidebug_lines(
         s_fn=s_fn, h_sys=h_sys,
         exit_enc=exit_enc, str_key=str_key, obn=obn,
-        imp_fn=imp_fn)
+        imp_fn=imp_fn, h_blt=h_blt)
     for _adl in _ad_lines:
         a(_adl)
     a("")
 
     # ── INLINE STATE 0: decode blob ───────────────────────────────────────────
     a(f"{sm_data} = {decode_fn}({sm_blob})")
-    a(f"{sm_blob} = None")
+    a(f"{sm_blob} = " + sing("None"))
     a("")
 
     # ── INLINE STATE 1: integrity check ──────────────────────────────────────
@@ -412,7 +366,7 @@ def generate_stub(
     a(f"{sm_key} = getattr({h_os}, {s_fn}({environ_enc})).get({s_fn}({gnolly_key_enc}))")
     a(f"if {sm_key}:")
     a("    try: " + sm_key + " = " + hx_fn + "(" + em(sm_key, "strip") + ")")
-    a(f"    except Exception: {sm_key} = None")
+    a(f"    except Exception: {sm_key} = " + sing("None"))
     a(f"if not {sm_key}:")
     a(f"    try:")
     a(f"        {v[29]} = {imp_fn}({s_fn}({getpass_enc}))")
@@ -447,6 +401,7 @@ def generate_stub(
             silent=silent,
             module_stem="_gnolly_core",
             n_offset=0,
+            h_blt=h_blt,
         )
         for _hl in _hook_lines:
             a(_hl)
@@ -467,6 +422,7 @@ def generate_stub(
             module_stem="_gnolly_vm",
             n_offset=25,
             vm_loader_call=_vm_loader_var,
+            h_blt=h_blt,
         )
         for _hl in _vm_hook_lines:
             a(_hl)
