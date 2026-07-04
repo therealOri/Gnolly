@@ -146,12 +146,12 @@ The suffix encodes the Python version and platform, e.g. `.cpython-312-x86_64-li
 ```bash
 python setup.py build_ext --inplace
 ```
+> This creates both `.so` files inside `gnolly/` locally and installs them in your site-packages library.
 
-This creates both `.so` files inside `gnolly/` locally and installs them in your site-packages library.
+<br>
 
 ### Where to place the .so files when distributing
-
-Gnolly searches for each `.so` in four locations, tried in order:
+> Gnolly searches for each `.so` in four locations, tried in order:
 
 | Priority | Location | Typical use |
 |---|---|---|
@@ -176,6 +176,8 @@ pip install gnolly          # installs with pre-built .so files
 python my_script.gnolly.py  # finds both .so files via sys.modules
 ```
 
+<br>
+
 ### What happens if a .so file is not found
 
 ```
@@ -183,10 +185,22 @@ Gnolly runtime (_gnolly_vm) not found.
 Place _gnolly_vm*.so next to this script, or in ./gnolly/, or install gnolly.
   pip install gnolly
 ```
+> The process exits immediately with code 1. No decryption is attempted and no information about the code is exposed.
 
-The process exits immediately with code 1. No decryption is attempted and no information about the payload is exposed.
+<br>
 
----
+### Versioning & Deployment
+The `.so` pair is part of the protected artifact, not a separate dependency, so every protected file cryptographically binds itself to the *exact* `_gnolly_core`/`_gnolly_vm` bytes present at protect time (see [Security & Design](#security--design)). This means `{your_script.gnly.py, _gnolly_core.so, _gnolly_vm.so}` is really **one versioned unit**, not a script plus a swappable runtime dependency.
+
+
+- **Always ship the matching `.so` pair alongside each protected file.** Search location #1 (same directory as the script) is checked first specifically so a bundled pair always wins over anything else on the machine. This is the deployment model to use.
+
+- **Don't rely on a separately-updatable, system-wide `gnolly` install for already-shipped files** (search locations #3/#4). If end users or your own infrastructure can `pip install --upgrade gnolly` independently of redeploying the protected files, the next `.so` upgrade will silently break every file that was protected using the old libs, because decryption keys, not just a version check, depend on the exact `.so` bytes. Expect older protected files to stop working the moment the shared install underneath them changes; this is not a bug, it is the point of the integrity binding. Old proected files use old libs, etc.
+
+- **When we make a new release**: rebuild the `.so` files, then re-run `protect()`/`gnolly protect` on your sources using the latest build, and ship the new `.so` pair together with the newly protected output. This is normal build-artifact hygiene, not extra burden and it is the same model PyArmor and other bytecode-VM protectors use.
+
+- **Avoid independent rebuilds of "the same" `.so` at different pipeline stages.** Cython/C compiles are not guaranteed byte-for-byte identical across separate builds of an identical source (build timestamps, absolute paths in debug info, compiler version, etc. can all vary). If your CI builds the `.so` once for the protect step and then rebuilds it again separately for the distributed bundle, the two can differ and a false-positive or an integrity failure with zero actual tampering could result in the code not running. Build once, then copy that exact file to every place it needs to be.
+__ __
 
 <br>
 
@@ -332,6 +346,8 @@ gnolly protect --bind-fp <hex> your_script.py        # run on build machine
 
 The machine fingerprint is folded into the PBKDF2 key derivation. On the wrong machine, AES-GCM authentication fails silently, the protected file exits with code 1 and no information is disclosed.
 
+This composes with the `.so` integrity binding described [above](#versioning-the-so-pair-is-part-of-the-protected-artifact-not-a-separate-dependency): both foldings apply in sequence, so a wrong machine *or* a tampered/mismatched `.so` pair each independently break the key.
+
 ---
 
 <br>
@@ -342,7 +358,8 @@ The machine fingerprint is folded into the PBKDF2 key derivation. On the wrong m
 |---|---|
 | No source in output | Source is compiled to GIR before encryption; plaintext never written to disk |
 | No key in output | Key is always external -> env var or interactive prompt |
-| Tamper detection | AES-256-GCM authentication tag; SHA-256 hash of both `.so` files baked into stub |
+| Tamper detection (blob) | AES-256-GCM authentication tag -> any modification of the encrypted code fails decryption outright |
+| Tamper detection (`.so` files) | Both `.so` hashes are folded into the PBKDF2 key derivation (see `gnolly/integrity.py`); a modified `.so` silently derives a different key and fails GCM authentication. A separate, obfuscated hash pre-check gives a cleaner early exit for mismatches, but is not itself the security boundary, the key fold is what actually can't be bypassed by patching a comparison. |
 | Unique per-file encoding | GIR opcode shuffle keyed per file; same source -> different binary blob every run |
 | No CPython eval loop | Protected code runs in `_gnolly_vm`'s own Cython stack machine, never via `ceval.c` |
 | No `marshal` | GIR is a custom binary format; `marshal.loads` is never called |
@@ -351,12 +368,10 @@ The machine fingerprint is folded into the PBKDF2 key derivation. On the wrong m
 | Strong KDF | PBKDF2-HMAC-SHA256, 600,000 iterations (OWASP 2024 recommendation for SHA-256) |
 | No `__import__` in stub | All imports routed through an obfuscated `__builtins__` alias |
 | No external network calls | Protected file is fully self-contained; no phone-home, no activation |
-| Machine binding | `--bind` folds a hardware fingerprint into the KDF — wrong machine -> wrong key -> GCM auth fails |
+| Machine binding | `--bind` folds a hardware fingerprint into the KDF: wrong machine -> wrong key -> GCM auth fails |
 | Obfuscated `.so` loading | Extensions are loaded by file path under a random fake module name; `gnolly` and `_gnolly_core` do not appear as strings in the stub |
 | Anti-debug (Python layer) | Trace/profile hooks, known debugger modules, and timing gates checked before any crypto work |
 | Anti-debug (C layer) | A second independent sweep runs inside the compiled `.so` after the stub's checks |
-
-<br>
 
 ### What Gnolly does NOT do
 
@@ -364,9 +379,6 @@ The machine fingerprint is folded into the PBKDF2 key derivation. On the wrong m
 - Gnolly does not prevent inspection of process memory at runtime. (yet)
 - Gnolly does not enforce expiry dates, seat counts, or call home.
 > I plan on improving anti-debug and anti-tamper as well as general security hardening eventually. At this point, I can only make things harder :).
-
-<br>
-
 __ __
 
 <br>
@@ -440,6 +452,7 @@ Gnolly_Main/
 │   ├── encoding.py           — custom seeded-alphabet codec
 │   ├── stub.py               — generates the obfuscated loader script
 │   ├── import_hook.py        — generates .so search and load code
+|   ├── integrity.py          — folds file hashes into a key to uphold integrity
 │   ├── binding.py            — machine fingerprinting for --bind
 │   ├── keymanager.py         — key generation, save, load
 │   ├── verify.py             — python -m gnolly.verify self-test
