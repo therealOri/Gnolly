@@ -58,6 +58,7 @@ def generate_import_hook_lines(
     module_stem: str = "_gnolly_core",
     n_offset: int = 0,
     vm_loader_call: str | None = None,
+    h_blt: str | None = None,   # builtins module handle -> obfuscates None
 ) -> tuple[list[str], str]:
     """
     Generate stub lines that:
@@ -92,6 +93,13 @@ def generate_import_hook_lines(
         encoded = [ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate(method)]
         arg_str = ', '.join(args)
         return f"getattr({obj}, {s_fn}({encoded}))({arg_str})"
+
+    def sing(name: str) -> str:
+        """getattr(builtins_handle, 'None') -> falls back to the bare
+        literal if the caller didn't wire up h_blt."""
+        if h_blt is None:
+            return name
+        return f"getattr({h_blt}, {enc(name)})"
 
     # Variable slots (offset so two calls don't collide)
     o = n_offset
@@ -128,7 +136,7 @@ def generate_import_hook_lines(
     # ── search location 1: directory of the protected .py file ───────────────
     # The most common layout: user places the .so right next to their script.
     # __file__ is set to the stub's own path by CPython before execution.
-    a(f"    {v_so} = None")
+    a(f"    {v_so} = " + sing("None"))
     a(f"    {v_script} = getattr({v_sysmod}, {enc('argv')}, [''])[0]")
     a(f"    if {v_script}:")
     # Path(argv[0]).parent / soname  -> no resolve() needed, parent is a property
@@ -136,18 +144,18 @@ def generate_import_hook_lines(
     a(f"        if {em(v_cand, 'exists')}: {v_so} = {v_cand}")
 
     # ── search location 2: ./gnolly/ relative to cwd ─────────────────────────
-    a(f"    if {v_so} is None:")
+    a(f"    if {v_so} is " + sing("None") + ":")
     a(f"        {v_cand} = {v_path}({enc('.')}) / {enc('gnolly')} / {v_soname}")
     a(f"        if {em(v_cand, 'exists')}: {v_so} = {v_cand}")
 
     # ── search location 3: gnolly package dir via sys.modules ────────────────
-    a(f"    if {v_so} is None:")
+    a(f"    if {v_so} is " + sing("None") + ":")
     a(f"        if {enc('gnolly')} in getattr({v_sysmod}, {enc('modules')}):")
     a(f"            {v_cand} = {v_path}(getattr(getattr({v_sysmod}, {enc('modules')})[{enc('gnolly')}], {enc('__file__')}, '')) / '..' / {v_soname}")
     a(f"            if {em(v_cand, 'exists')}: {v_so} = {v_cand}")
 
     # ── search location 4: scan sys.path for gnolly/ subdir ──────────────────
-    a(f"    if {v_so} is None:")
+    a(f"    if {v_so} is " + sing("None") + ":")
     a(f"        for {v_item} in getattr({v_sysmod}, {enc('path')}):")
     a(f"            {v_cand} = {v_path}({v_item}) / {enc('gnolly')} / {v_soname}")
     a(f"            if {em(v_cand, 'exists')}:")
@@ -155,7 +163,7 @@ def generate_import_hook_lines(
     a(f"                break")
 
     # ── not found: silent exit, or helpful message if not in silent mode ────────
-    a(f"    if {v_so} is None:")
+    a(f"    if {v_so} is " + sing("None") + ":")
     if not silent:
         _nl = chr(10)
         a(f"        getattr(getattr({v_sysmod}, {enc('stderr')}), {enc('write')})({enc(f'Gnolly runtime ({module_stem}) not found.' + _nl)})")
