@@ -58,25 +58,27 @@ def generate_import_hook_lines(
     module_stem: str = "_gnolly_core",
     n_offset: int = 0,
     vm_loader_call: str | None = None,
-) -> list[str]:
+) -> tuple[list[str], str]:
     """
     Generate stub lines that:
     1. Find <module_stem>.so via four search locations (see module docstring)
-    2. Verify its SHA-256 hash
+    2. Verify its SHA-256 hash against an obfuscated expected value (cosmetic
+       fast-fail only -> see the note above the hash-verification block)
     3. Load it via importlib.util.spec_from_file_location
     4. Extract the requested symbol (gnolly_run for core; the module itself
        for VM, passed to vm_loader_call) from the loaded module
     5. On missing/tampered .so: exit(1)
     6. On any other failure: exit(1)
 
-    For module_stem='_gnolly_vm', cr_var is unused for symbol extraction;
-    instead, vm_loader_call (a snippet like "MYCOREVAR_loadvm") is invoked
-    with the loaded module object so _gnolly_core can register it without
-    a relative import (which doesn't resolve under this loading scheme).
-
-    All string literals encoded as basic int-lists. No 'gnolly' in plaintext.
-    n_offset lets a second call to this function (for the second .so) use
-    a disjoint slice of the N[] variable pool so generated names don't collide.
+    Returns
+    -------
+    (lines, hash_var) -> hash_var is the name of the local variable holding
+    the loaded .so's *raw* SHA-256 digest (bytes, not hex). The caller
+    (stub.py) folds this into the decryption key alongside the other .so's
+    hash -> that fold is the actual integrity enforcement; a tampered .so
+    changes hash_var, which changes the derived key, which makes AES-GCM
+    reject the ciphertext regardless of whether the cosmetic check above
+    was patched out.
     """
     lines = []
     a = lines.append
@@ -99,7 +101,7 @@ def generate_import_hook_lines(
     v_path    = N[83 + o]   # pathlib.Path class
     v_so      = N[84 + o]   # Path to .so (resolved)
     v_hash_m  = N[85 + o]   # hashlib module
-    v_hash_v  = N[86 + o]   # computed hash value
+    v_hash_v  = N[86 + o]   # computed hash value (hex)
     v_so_rb   = N[87 + o]   # .so bytes
     v_spec    = N[88 + o]   # module spec
     v_mod     = N[89 + o]   # loaded module object
@@ -107,6 +109,8 @@ def generate_import_hook_lines(
     v_item    = N[91 + o]   # loop variable
     v_cand    = N[92 + o]   # candidate path being tested
     v_script  = N[93 + o]   # __file__ of the running stub
+    v_hash_o  = N[95 + o]   # hash object (so we compute the digest only once)
+    v_hash_rw = N[96 + o]   # computed hash value (raw digest bytes, for key folding)
 
     a(f"try:")
 
@@ -160,10 +164,18 @@ def generate_import_hook_lines(
     a(f"        raise ImportError")
 
     # ── hash verification -> silent on failure (no hint to attacker) ─────────────
+    # This is a cosmetic, obfuscated fast-fail layer only: it gives a clean
+    # early exit for an accidental .so/gnolly-version mismatch. It is NOT the
+    # real security boundary -> that's the key-derivation fold applied later
+    # in stub.py (via v_hash_rw), which an attacker cannot bypass by patching
+    # this comparison, because a bypass here still leaves them with the wrong
+    # AES key and a GCM authentication failure on decrypt.
     a(f"    {v_hash_m} = {imp_fn}({enc('hashlib')})")
     a(f"    {v_so_rb}  = {em(v_so, 'read_bytes')}")
-    a(f"    {v_hash_v} = {em('getattr(' + v_hash_m + ', ' + enc('sha256') + ')(' + v_so_rb + ')', 'hexdigest')}")
-    a(f"    if {v_hash_v} != {repr(so_hash)}:")
+    a(f"    {v_hash_o} = getattr({v_hash_m}, {enc('sha256')})({v_so_rb})")
+    a(f"    {v_hash_v}  = {em(v_hash_o, 'hexdigest')}")
+    a(f"    {v_hash_rw} = {em(v_hash_o, 'digest')}")
+    a(f"    if {v_hash_v} != {enc(so_hash)}:")
     a(f"        raise ImportError")
 
     # ── load via importlib.util ───────────────────────────────────────────────
@@ -188,7 +200,7 @@ def generate_import_hook_lines(
     a(f"except Exception:")
     a(f"    getattr({h_sys}, {s_fn}({exit_enc}))(1)")
 
-    return lines
+    return lines, v_hash_rw
 
 
 def get_vm_so_hash() -> str | None:
