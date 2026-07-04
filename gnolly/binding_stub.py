@@ -138,8 +138,6 @@ def generate_binding_lines(
     a(f"    {vfp_result} = getattr({vfp_hash}, {enc('digest')})()")
     # Fold fingerprint into sm_key via HMAC
     a(f"    {vfp_hmac} = __import__({enc('hmac')})")
-    a(f"    {sm_key} = getattr({vfp_hmac}, {enc('new')})({vfp_result}, {sm_key}, {enc('sha256')!r}[0] if False else {enc('sha256')})")
-    lines.pop()  # fix the hacky sha256 encoding
     a(f"    {sm_key} = getattr({vfp_hmac}, {enc('new')})({vfp_result}, {sm_key}, getattr({vfp_h}, {enc('sha256')})).digest()")
 
     # Cleanup binding locals
