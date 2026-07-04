@@ -606,7 +606,8 @@ class TestImportHook:
             assert ident not in stub, f"'{ident}' found in stub"
 
     def test_so_hash_embedded(self):
-        """The .so hash is embedded in the stub for verification."""
+        """The .so hash is verified against by the stub, but obfuscated &
+        not embedded as a bare, grep-able plaintext literal."""
         from gnolly.pipeline import protect
         from gnolly.keymanager import generate_key
         from gnolly.import_hook import get_core_so_hash
@@ -614,7 +615,8 @@ class TestImportHook:
         if so_hash is None:
             pytest.skip("No compiled .so")
         stub = protect("x=1", generate_key(), seed=11)
-        assert so_hash in stub, ".so hash not found in stub"
+        assert so_hash not in stub, \
+            ".so hash must not appear as a plaintext literal in the stub"
 
     def test_stub_runs_with_hook(self):
         """Protected file runs correctly using the import hook path."""
