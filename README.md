@@ -16,7 +16,7 @@ __ __
 
 # Gnolly
 
-**Professional Python code protection. Free, open-source, and with no paywalls.**
+**Professional Python code protection. Free, open-source, no paywalls.**
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 
@@ -356,6 +356,8 @@ The machine fingerprint is folded into the PBKDF2 key derivation. On the wrong m
 | Anti-debug (Python layer) | Trace/profile hooks, known debugger modules, and timing gates checked before any crypto work |
 | Anti-debug (C layer) | A second independent sweep runs inside the compiled `.so` after the stub's checks |
 
+<br>
+
 ### What Gnolly does NOT do
 
 - **Gnolly is not DRM.** A determined adversary with your key and a C-level debugger (e.g. gdb attached to the Python process) can reconstruct logic by instrumenting the runtime at the C level. Code protection raises the cost and effort of reverse engineering; it does not make it theoretically impossible. 
@@ -365,17 +367,6 @@ The machine fingerprint is folded into the PBKDF2 key derivation. On the wrong m
 
 <br>
 
-### Known limitations
-> What I plan on fixing eventually.
-
-| Construct | Status |
-|---|---|
-| `match` / `case` statements | The numeric obfuscation pass rewrites integer literals inside `case` patterns, producing invalid syntax. Avoid `match` in protected files for now. |
-| `except*` / exception groups | `CHECK_EG_MATCH` is not yet in the GIR ISA. Not supported. |
-| Zero-arg `super()` | `LOAD_SUPER_ATTR` is not yet supported. Use `super(ClassName, self)` as a workaround. |
-| Floating-point constants | The numeric obfuscator decomposes floats (e.g. `0.5` -> `9.668 - 9.168`) with fresh randomness per run; results are correct to ~14 significant figures but the last 2–4 bits may differ from the original due to floating-point rounding across reconstructed expressions. |
-
-Everything else such as: functions, classes, closures, decorators, generators, `async`/`await`, async generators, context managers, comprehensions, exceptions, `*args`/`**kwargs`, multiple inheritance, and walrus operator are supported currenly.
 __ __
 
 <br>
