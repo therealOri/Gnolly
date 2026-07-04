@@ -158,7 +158,7 @@ def _obf_from_import(module_name: str, attr: str, alias: str, s_fn: str, key: by
     enc_mod  = _enc_str(module_name, key)
     enc_attr = _enc_str(attr, key)
     enc_fl   = _enc_str('fromlist', key)
-    # Use **{s_fn(enc_fl): [...]} so the literal string 'fromlist' never
+    # Use **{s_fn(enc_fl): [...]} so the literal string "fromlist" never
     # appears in the generated output and only a basic encoded int-list.
     return (f"{alias} = getattr("
             f"{imp_fn}({s_fn}({enc_mod}), **{{{s_fn}({enc_fl}): [{s_fn}({enc_attr})]}}),"
@@ -398,9 +398,13 @@ def generate_stub(
     a("")
 
     # ── INLINE STATE 1: integrity check ──────────────────────────────────────
+    # Cosmetic fast-fail only (see gnolly/integrity.py) -> AES-GCM's own
+    # auth tag already detects any tampering of the blob. We will still
+    # obfuscate the expected value like everything else, so it doesn't sit
+    # in the file as a bare, grep-able 64-char hex literal.
     a(f"{v[28]} = getattr({h_hash}, {s_fn}({sha256_enc}))({sm_data})")
     a(v[28] + " = " + em(v[28], "hexdigest"))
-    a(f"if {v[28]} != {repr(hash_hex)}:")
+    a(f"if {v[28]} != {s_fn}({_enc_str(hash_hex, str_key)}):")
     a(f"    getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})")
     a("")
 
@@ -433,7 +437,7 @@ def generate_stub(
     _vm_so_hash = get_vm_so_hash()
 
     if _so_hash and _vm_so_hash:
-        _hook_lines = generate_import_hook_lines(
+        _hook_lines, _core_hash_var = generate_import_hook_lines(
             s_fn=s_fn, b_fn=b_fn,
             str_key=str_key, byt_key=byt_key,
             obn=obn, N=N, cr_var=cr_var,
@@ -452,7 +456,7 @@ def generate_stub(
         _vm_loader_var = N[149]
         a(f"{_vm_loader_var} = getattr({N[89]}, {s_fn}({_enc_str('_gnolly_load_vm_module', str_key)}))")
 
-        _vm_hook_lines = generate_import_hook_lines(
+        _vm_hook_lines, _vm_hash_var = generate_import_hook_lines(
             s_fn=s_fn, b_fn=b_fn,
             str_key=str_key, byt_key=byt_key,
             obn=obn, N=N, cr_var=cr_var,
@@ -466,6 +470,16 @@ def generate_stub(
         )
         for _hl in _vm_hook_lines:
             a(_hl)
+
+        # ── INTEGRITY BINDING: fold both .so's raw hashes into sm_key ─────────
+        _integrity_domain_enc = _enc_bytes_as_str(b'gnolly-integrity-bind-v1:', byt_key)
+        _hmac_var = N[130]
+        a(f"{_hmac_var} = {imp_fn}({s_fn}({_enc_str('hmac', str_key)}))")
+        a(f"{sm_key} = getattr({_hmac_var}, {s_fn}({_enc_str('new', str_key)}))("
+          f"{b_fn}({_integrity_domain_enc}) + {_core_hash_var} + {_vm_hash_var}, "
+          f"{sm_key}, getattr({h_hash}, {s_fn}({sha256_enc})))"
+          f".digest()")
+        a("")
 
         # Both .so files verified, loaded, and the VM registered into core.
         # gnolly_run will hard-exit if _VM_LOADED is somehow still False.
