@@ -40,14 +40,15 @@ from .encoding    import GnollyCodec
 from .stub        import generate_stub
 from .build_core  import ensure_core
 from .binding     import bind_salt, collect_fingerprint, fingerprint_from_hex
+from .integrity   import collect_runtime_hashes, fold_integrity
 from .vm_pipeline import protect_with_vm
 from .vm_translate import VMUnsupportedError
 
 # Auto-build the Cython extension on first import.
 ensure_core(verbose=False)
 
-_MAGIC_VER_LEN = len(_MAGIC) + len(_VERSION)   # 6
-_HEADER_LEN    = _MAGIC_VER_LEN + _SALT_LEN + _IV_LEN + _TAG_LEN  # 66
+_MAGIC_VER_LEN = len(_MAGIC) + len(_VERSION)
+_HEADER_LEN    = _MAGIC_VER_LEN + _SALT_LEN + _IV_LEN + _TAG_LEN
 
 # VM mode flag byte prepended to the payload
 _VM_MODE_BYTE = b'\x01'
@@ -68,8 +69,6 @@ def protect(
     silent: bool = True,
 ) -> str:
     """
-    Run the full Gnolly pipeline on *source* and return the loader stub source.
-
     Parameters
     ----------
     source          : original Python source code
@@ -148,6 +147,8 @@ def protect(
         _effective_password = _hmac.new(
             machine_fingerprint, password, __import__('hashlib').sha256
         ).digest()
+    runtime_hashes = collect_runtime_hashes()
+    _effective_password = fold_integrity(_effective_password, runtime_hashes)
     encrypted_blob = encrypt(compressed, _effective_password)
 
     salt = encrypted_blob[_MAGIC_VER_LEN            : _MAGIC_VER_LEN + _SALT_LEN]
