@@ -33,50 +33,30 @@ from __future__ import annotations
 import ast
 import random
 import secrets
+from .namegen import random_confusable_name
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Name generation — I/l/O/0 confusable characters
+# Name generation -> random, collision-checked, confusable identifiers
+# (see gnolly.namegen for the character set and rationale)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_CONF = "IlO0"
-
-def _confname(n: int) -> str:
-    """
-    Generate the n-th obfuscated identifier as a fixed-width, 8-digit
-    base-4 number over the confusable alphabet _CONF ("IlO0"), prefixed
-    with "Il". This is a true bijection from n -> name: every non-negative
-    integer below 4**8 (65536) maps to a distinct 10-character identifier.
-    """
-    if n < 0 or n >= 4 ** 8:
-        raise ValueError(
-            f"_confname: index {n} out of range: name pool exhausted "
-            f"(supports up to {4 ** 8} unique identifiers per file)"
-        )
-    digits = []
-    m = n
-    for _ in range(8):
-        digits.append(_CONF[m % 4])
-        m //= 4
-    return "Il" + "".join(reversed(digits))
+_NAME_LEN = 12
 
 
 class _NamePool:
     def __init__(self, seed: int = 0):
-        self._counter = 0
         self._rng = random.Random(seed)
+        self._used: set = set()
         self.map: dict[str, str] = {}
 
     def get(self, name: str) -> str:
         if name not in self.map:
-            self.map[name] = _confname(self._counter)
-            self._counter += 1
+            self.map[name] = random_confusable_name(self._rng, self._used, _NAME_LEN)
         return self.map[name]
 
     def fresh(self) -> str:
-        n = _confname(self._counter)
-        self._counter += 1
-        return n
+        return random_confusable_name(self._rng, self._used, _NAME_LEN)
 
 
 _PROTECTED = frozenset({
@@ -270,13 +250,16 @@ def _obf_import_from(node: ast.ImportFrom, pool: _NamePool) -> list[ast.stmt]:
 # Pass 6 -> Control-flow flattening (state-machine dispatch)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random) -> list[ast.stmt]:
+def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random, bi_getter) -> list[ast.stmt]:
     """
     Flatten a function body into a while-True dispatch loop.
     Skip if body has fewer than 3 stmts or no branching:  not worth it.
     Also skip if body contains a bare Return in a non-tail position
     (those get handled naturally since we emit state transitions before them).
     There is room for improvemnt here.
+
+    bi_getter: see _noise() -> routes the loop's True through the same
+    getattr(builtins, "...") obfuscation as everywhere else.
     """
     has_branch = any(isinstance(s, (ast.If, ast.For, ast.While, ast.Try))
                      for s in body)
@@ -341,7 +324,10 @@ def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random) -> list[
         value=ast.Constant(value=states[0]),
         lineno=1, col_offset=0)
     loop   = ast.While(
-        test=ast.Constant(value=True),
+        test=ast.Call(
+            func=ast.Name(id="getattr", ctx=ast.Load()),
+            args=[ast.Name(id=bi_getter(), ctx=ast.Load()), _enc_str("True")],
+            keywords=[]),
         body=[root_if],
         orelse=[])
 
@@ -352,12 +338,19 @@ def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random) -> list[
 # Pass 7 -> Dead code helpers
 # ─────────────────────────────────────────────────────────────────────────────
 # > Room for improvemnt here
-def _dead() -> ast.stmt:
+def _dead(bi_getter) -> ast.stmt:
+    """bi_getter: see _noise() -> routes True/False here through the same
+    getattr(builtins, "...") obfuscation as everywhere else."""
+    def _t(name):
+        return ast.Call(
+            func=ast.Name(id="getattr", ctx=ast.Load()),
+            args=[ast.Name(id=bi_getter(), ctx=ast.Load()), _enc_str(name)],
+            keywords=[])
     c = secrets.randbelow(4)
     if c == 0:
-        return ast.While(test=ast.Constant(value=False), body=[ast.Pass()], orelse=[])
+        return ast.While(test=_t("False"), body=[ast.Pass()], orelse=[])
     elif c == 1:
-        return ast.Assert(test=ast.Constant(value=True), msg=None)
+        return ast.Assert(test=_t("True"), msg=None)
     elif c == 2:
         a = secrets.randbelow(0xFF)
         b = secrets.randbelow(0xFF) + 0x100
@@ -377,7 +370,15 @@ def _dead() -> ast.stmt:
 # Pass 9 -> Polymorphic module-level noise
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _noise(pool: _NamePool, count: int) -> list[ast.stmt]:
+def _noise(pool: _NamePool, count: int, bi_getter) -> list[ast.stmt]:
+    """
+    bi_getter: zero-arg callable returning the name of the (lazily
+    created) local builtins handle -> lets the True/False used here go
+    through the same getattr(builtins, "...") obfuscation as every other
+    True/False/None in the protected source, instead of leaking as bare
+    keyword constants just because this is scaffolding rather than
+    user code.
+    """
     stmts: list[ast.stmt] = []
     for _ in range(count):
         tmp = pool.fresh()
@@ -395,9 +396,17 @@ def _noise(pool: _NamePool, count: int) -> list[ast.stmt]:
                 ast.Delete(targets=[ast.Name(id=tmp, ctx=ast.Del())]),
             ]
         elif c == 1:
-            stmts.append(ast.Assert(test=ast.Constant(value=True), msg=None))
+            true_expr = ast.Call(
+                func=ast.Name(id="getattr", ctx=ast.Load()),
+                args=[ast.Name(id=bi_getter(), ctx=ast.Load()), _enc_str("True")],
+                keywords=[])
+            stmts.append(ast.Assert(test=true_expr, msg=None))
         else:
-            stmts.append(ast.If(test=ast.Constant(value=False),
+            false_expr = ast.Call(
+                func=ast.Name(id="getattr", ctx=ast.Load()),
+                args=[ast.Name(id=bi_getter(), ctx=ast.Load()), _enc_str("False")],
+                keywords=[])
+            stmts.append(ast.If(test=false_expr,
                                 body=[ast.Pass()], orelse=[]))
     return stmts
 
@@ -420,6 +429,21 @@ class _Transformer(ast.NodeTransformer):
         self._fstr_depth   = 0
         self._pattern_depth = 0  # track whether we're inside a match-case pattern
         self._class_depth  = 0   # track whether we're inside a class
+        self._bi_var       = None   # lazily-created builtins module handle used to obfuscate None/True/False (see _singleton() and visit_Module)
+
+    def _bi(self) -> str:
+        """Name of the (lazily created) local builtins module handle."""
+        if self._bi_var is None:
+            self._bi_var = self._pool.fresh()
+        return self._bi_var
+
+    def _singleton(self, name: str, node: ast.AST) -> ast.expr:
+        return ast.copy_location(
+            ast.Call(
+                func=ast.Name(id="getattr", ctx=ast.Load()),
+                args=[ast.Name(id=self._bi(), ctx=ast.Load()), _enc_str(name)],
+                keywords=[]),
+            node)
 
     def _strip_doc(self, body):
         if (body and isinstance(body[0], ast.Expr)
@@ -435,7 +459,7 @@ class _Transformer(ast.NodeTransformer):
         for stmt in body:
             out.append(stmt)
             if self._rng.random() < 0.35:
-                out.append(_dead())
+                out.append(_dead(self._bi))
         return out
 
     # Module
@@ -443,7 +467,15 @@ class _Transformer(ast.NodeTransformer):
         node.body = self._strip_doc(node.body)
         self.generic_visit(node)
         cnt = self._rng.randint(2, 5)
-        node.body = _noise(self._pool, cnt) + node.body
+        noise_stmts = _noise(self._pool, cnt, self._bi)
+        preamble = []
+        if self._bi_var is not None:
+            preamble.append(ast.Assign(
+                targets=[ast.Name(id=self._bi_var, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Name(id="__import__", ctx=ast.Load()),
+                    args=[_enc_str("builtins")], keywords=[])))
+        node.body = preamble + noise_stmts + node.body
         return node
 
     # Classes -> increment depth so method names aren't registered
@@ -463,7 +495,7 @@ class _Transformer(ast.NodeTransformer):
         node.body = self._strip_doc(node.body)
         self.generic_visit(node)
         if self._flatten:
-            node.body = _flatten(node.body, self._pool, self._rng)
+            node.body = _flatten(node.body, self._pool, self._rng, self._bi)
         node.body = self._scatter_dead(node.body)
         return node
 
@@ -523,7 +555,7 @@ class _Transformer(ast.NodeTransformer):
                 case.guard = self.visit(case.guard)
             case.body = [self.visit(stmt) for stmt in case.body]
             if self._flatten:
-                case.body = _flatten(case.body, self._pool, self._rng)
+                case.body = _flatten(case.body, self._pool, self._rng, self._bi)
             case.body = self._scatter_dead(case.body)
         return node
 
@@ -536,6 +568,12 @@ class _Transformer(ast.NodeTransformer):
             try:    return ast.copy_location(_enc_str(v), node)
             except: return node
         if isinstance(v, bool):
+            if self._obf_const:
+                return self._singleton("True" if v else "False", node)
+            return node
+        if v is None:
+            if self._obf_const:
+                return self._singleton("None", node)
             return node
         if isinstance(v, int) and self._obf_const and abs(v) <= 0xFFFFFF:
             return ast.copy_location(_enc_int(v), node)
@@ -560,8 +598,7 @@ def obfuscate_source(
     flatten_flow:  bool = True,
 ) -> str:
     """
-    Apply all obfuscation passes to *source*.  Returns valid Python source
-    that compiles and executes identically to the original.
+    Apply all obfuscation passes to source. Returns valid Python source that compiles and executes identically to the original.
     """
     tree = ast.parse(source)
 
