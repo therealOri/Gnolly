@@ -21,8 +21,10 @@ silent failure.
 """
 from __future__ import annotations
 import hashlib
+import random
 import secrets
 from pathlib import Path
+from .namegen import random_confusable_name
 
 
 def get_core_so_hash() -> str | None:
@@ -59,6 +61,7 @@ def generate_import_hook_lines(
     n_offset: int = 0,
     vm_loader_call: str | None = None,
     h_blt: str | None = None,   # builtins module handle -> obfuscates None
+    rng: random.Random | None = None,  # for single-char comprehension names
 ) -> tuple[list[str], str]:
     """
     Generate stub lines that:
@@ -155,12 +158,16 @@ def generate_import_hook_lines(
     a(f"            if {em(v_cand, 'exists')}: {v_so} = {v_cand}")
 
     # ── search location 4: scan sys.path for gnolly/ subdir ──────────────────
+    # next() over a generator expression instead of "for item in sys.path:
+    # build candidate, check, break" -> no steppable loop body for a
+    # debugger or quick skim to latch onto.
+    _rng = rng or random.Random()
+    _sp_used: set = set()
+    _sc1, _sc2 = (random_confusable_name(_rng, _sp_used, 1) for _ in range(2))
     a(f"    if {v_so} is " + sing("None") + ":")
-    a(f"        for {v_item} in getattr({v_sysmod}, {enc('path')}):")
-    a(f"            {v_cand} = {v_path}({v_item}) / {enc('gnolly')} / {v_soname}")
-    a(f"            if {em(v_cand, 'exists')}:")
-    a(f"                {v_so} = {v_cand}")
-    a(f"                break")
+    a(f"        {v_so} = next(({_sc1} for {_sc1} in "
+      f"({v_path}({_sc2}) / {enc('gnolly')} / {v_soname} for {_sc2} in getattr({v_sysmod}, {enc('path')}))"
+      f" if {em(_sc1, 'exists')}), " + sing("None") + ")")
 
     # ── not found: silent exit, or helpful message if not in silent mode ────────
     a(f"    if {v_so} is " + sing("None") + ":")
