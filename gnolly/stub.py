@@ -28,7 +28,6 @@ from .import_hook  import generate_import_hook_lines, get_core_so_hash, get_vm_s
 from .namegen import random_confusable_name
 
 
-
 def _gen_names(count: int, seed: int) -> list:
     rng = random.Random(seed)
     used: set = set()
@@ -238,23 +237,22 @@ def generate_stub(
     a("")
 
     # ── Custom alphabet decoder ───────────────────────────────────────────────
+    # Rewritten as a nested comprehension (decode groups -> flatten to bytes)
+    # instead of a step-by-step for-loop with three separate .append() calls.
     alpha_enc = _enc_str(alpha, str_key)
     a(f"{alpha_var} = {s_fn}({alpha_enc})")
     a(f"{rev_var} = {{_c: _i for _i, _c in enumerate({alpha_var})}}")
+    _dc_used: set = set()
+    cp, ct, cn, cb, ci, cx, cy = (random_confusable_name(rng, _dc_used, 1) for _ in range(7))
     a(f"def {decode_fn}({v[4]}):")
-    a(f"    {v[5]} = " + em(v[4], "count", "chr(61)"))
-    a(f"    {v[6]} = " + em(v[4], "replace", "chr(61)", alpha_var + "[0]"))
-    a(f"    {v[7]} = bytearray()")
-    a(f"    for {v[8]} in range(0, len({v[6]}), {obn(4)}):")
-    a(f"        {v[9]} = ({rev_var}[{v[6]}[{v[8]}  ]] << {obn(18)}")
-    a(f"                | {rev_var}[{v[6]}[{v[8]}+1]] << {obn(12)}")
-    a(f"                | {rev_var}[{v[6]}[{v[8]}+2]] << {obn(6)}")
-    a(f"                | {rev_var}[{v[6]}[{v[8]}+3]])")
-    a(f"        getattr({v[7]}, {s_fn}({_enc_str(chr(97)+chr(112)+chr(112)+chr(101)+chr(110)+chr(100), str_key)}))(({v[9]} >> {obn(16)}) & {obn(255)})")
-    a(f"        getattr({v[7]}, {s_fn}({_enc_str(chr(97)+chr(112)+chr(112)+chr(101)+chr(110)+chr(100), str_key)}))(({v[9]} >> {obn(8)})  & {obn(255)})")
-    a(f"        getattr({v[7]}, {s_fn}({_enc_str(chr(97)+chr(112)+chr(112)+chr(101)+chr(110)+chr(100), str_key)}))( {v[9]}                & {obn(255)})")
-    a(f"    {v[10]} = bytes({v[7]})")
-    a(f"    if {v[5]}: {v[10]} = {v[10]}[:-{v[5]}]")
+    a(f"    {cp} = " + em(v[4], "count", "chr(61)"))
+    a(f"    {ct} = " + em(v[4], "replace", "chr(61)", alpha_var + "[0]"))
+    a(f"    {cn} = [({rev_var}[{ct}[{ci}]] << {obn(18)} | {rev_var}[{ct}[{ci}+1]] << {obn(12)}"
+      f" | {rev_var}[{ct}[{ci}+2]] << {obn(6)} | {rev_var}[{ct}[{ci}+3]])"
+      f" for {ci} in range(0, len({ct}), {obn(4)})]")
+    a(f"    {cb} = bytes({cx} for {cy} in {cn} for {cx} in"
+      f" (({cy} >> {obn(16)}) & {obn(255)}, ({cy} >> {obn(8)}) & {obn(255)}, {cy} & {obn(255)}))")
+    a(f"    {v[10]} = {cb}[:-{cp}] if {cp} else {cb}")
     a(f"    return {xor_fn}({v[10]}, {b_fn}({xor_key_enc}))")
     a("")
 
@@ -381,7 +379,7 @@ def generate_stub(
         for _bl in generate_binding_lines(
                 s_fn=s_fn, b_fn=b_fn, h_sys=h_sys, h_os=h_os,
                 sm_key=sm_key, str_key=str_key, byt_key=byt_key,
-                obn=obn, N=N):
+                obn=obn, N=N, rng=rng):
             a(_bl)
 
     # ── CYTHON IMPORT HOOKS -> both .so files required ─────────────────────────
@@ -402,6 +400,7 @@ def generate_stub(
             module_stem="_gnolly_core",
             n_offset=0,
             h_blt=h_blt,
+            rng=rng,
         )
         for _hl in _hook_lines:
             a(_hl)
@@ -423,6 +422,7 @@ def generate_stub(
             n_offset=25,
             vm_loader_call=_vm_loader_var,
             h_blt=h_blt,
+            rng=rng,
         )
         for _hl in _vm_hook_lines:
             a(_hl)
