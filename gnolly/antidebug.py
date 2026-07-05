@@ -21,7 +21,9 @@ The Cython core (gnolly_run) performs checks 1-3 natively in C currently as well
 so they apply even when the Python stub hands off to the .so.
 """
 from __future__ import annotations
+import random
 import secrets
+from .namegen import random_confusable_name
 
 
 # Known debugger / analysis module names -> encoded so they don't appear plaintext
@@ -79,14 +81,11 @@ def generate_antidebug_lines(
             return name
         return f"getattr({h_blt}, {s(name)})"
 
-    # Temp var names, using secrets for unpredictable suffixes
-    _v = lambda: '_' + secrets.token_hex(4)
-    vt  = _v()   # trace result
-    vp  = _v()   # profile result
-    vm  = _v()   # modules ref
-    vmod= _v()   # individual module name
-    vt2 = _v()   # timing start
-    vt3 = _v()   # timing end
+    # Temp var names -> confusable characters
+    _tv_rng = random.Random(secrets.randbits(64))
+    _tv_used: set = set()
+    vt, vp, vm, vmod, vt2, vt3 = (
+        random_confusable_name(_tv_rng, _tv_used, 6) for _ in range(6))
 
     exit_call = f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
 
@@ -102,7 +101,7 @@ def generate_antidebug_lines(
 
     # ── Check 3: known debug modules in sys.modules ───────────────────────────
     a(f"{vm} = getattr({h_sys}, {s('modules')})")
-    _cm = '_' + secrets.token_hex(3)
+    _cm = random_confusable_name(_tv_rng, _tv_used, 1)
     _mod_list = ', '.join(s(mod) for mod in _DEBUG_MODULES)
     a(f"if any({_cm} in {vm} for {_cm} in [{_mod_list}]): {exit_call}")
 
@@ -165,7 +164,8 @@ def generate_timing_check_lines(
         return f"{s_fn}({enc(text)})"
 
     exit_call = f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
-    vt3 = '_' + secrets.token_hex(4)
+    _tc_rng = random.Random(secrets.randbits(64))
+    vt3 = random_confusable_name(_tc_rng, set(), 6)
 
     a(f"{vt3} = getattr({imp_fn}({s('time')}), {s('perf_counter')})()")
     # min_seconds obfuscated as a/b float expression
