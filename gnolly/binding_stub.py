@@ -26,6 +26,7 @@ def generate_binding_lines(
     obn,             # obf_int callable
     N: list,         # name pool (we use N[60:80] for local vars)
     rng: random.Random | None = None,  # for single-char comprehension names
+    imp_fn: str = "__import__",  # obfuscated __import__ handle from the stub
 ) -> list[str]:
     """
     Return lines of Python source that:
@@ -77,9 +78,9 @@ def generate_binding_lines(
 
     a(f"# ── Machine binding: collect fingerprint + fold into key ─────────────")
     a(f"{vfp_parts} = []")
-    a(f"{vfp_h}    = __import__({enc('hashlib')})")
-    a(f"{vfp_uuid} = __import__({enc('uuid')})")
-    a(f"{vfp_sock} = __import__({enc('socket')})")
+    a(f"{vfp_h}    = {imp_fn}({enc('hashlib')})")
+    a(f"{vfp_uuid} = {imp_fn}({enc('uuid')})")
+    a(f"{vfp_sock} = {imp_fn}({enc('socket')})")
 
     # Source 1: /etc/machine-id (Linux)
     a(f"for {vfp_tmp} in [{enc('/etc/machine-id')}, {enc('/var/lib/dbus/machine-id')}]:")
@@ -91,9 +92,9 @@ def generate_binding_lines(
     a(f"    except Exception: pass")
 
     # Source 2: macOS IOPlatformUUID
-    a(f"if getattr(__import__({enc('sys')}), {enc('platform')}) == {enc('darwin')}:")
+    a(f"if getattr({imp_fn}({enc('sys')}), {enc('platform')}) == {enc('darwin')}:")
     a(f"    try:")
-    a(f"        {vfp_sub} = __import__({enc('subprocess')})")
+    a(f"        {vfp_sub} = {imp_fn}({enc('subprocess')})")
     a(f"        {vfp_out} = getattr({vfp_sub}, {enc(chr(99)+chr(104)+chr(101)+chr(99)+chr(107)+chr(95)+chr(111)+chr(117)+chr(116)+chr(112)+chr(117)+chr(116))})(")
     a(f"            [{enc(chr(105)+chr(111)+chr(114)+chr(101)+chr(103))}, {enc(chr(45)+chr(114)+chr(100)+chr(49))}, {enc(chr(45)+chr(99))}, {enc(chr(73)+chr(79)+chr(80)+chr(108)+chr(97)+chr(116)+chr(102)+chr(111)+chr(114)+chr(109)+chr(69)+chr(120)+chr(112)+chr(101)+chr(114)+chr(116)+chr(68)+chr(101)+chr(118)+chr(105)+chr(99)+chr(101))}],")
 
@@ -110,9 +111,9 @@ def generate_binding_lines(
     a(f"    except Exception: pass")
 
     # Source 3: Windows MachineGuid
-    a(f"if getattr(__import__({enc('sys')}), {enc('platform')}) == {enc('win32')}:")
+    a(f"if getattr({imp_fn}({enc('sys')}), {enc('platform')}) == {enc('win32')}:")
     a(f"    try:")
-    a(f"        {vfp_key} = __import__({enc('winreg')})")
+    a(f"        {vfp_key} = {imp_fn}({enc('winreg')})")
     a(f"        {vfp_tmp} = getattr({vfp_key}, {enc('OpenKey')})(")
     a(f"            getattr({vfp_key}, {enc('HKEY_LOCAL_MACHINE')}),")
     a(f"            {enc(r'SOFTWARE\Microsoft\Cryptography')})")
@@ -132,6 +133,13 @@ def generate_binding_lines(
     a("        " + em(vfp_parts, "append", enc("hostname=") + " + " + vfp_hn))
     a(f"except Exception: pass")
 
+    # Hash all components. The update-per-component loop becomes a
+    # side-effecting comprehension (result discarded) -> a well-known
+    # "abuse a comprehension for its effects, not its value" idiom that
+    # reads as data-construction rather than an obvious step-by-step
+    # hash-update loop. The discard target is a random confusable
+    # character rather than the conventional bare "_", which would
+    # otherwise telegraph "this assignment doesn't matter" to a reader.
     _rng = rng or random.Random()
     _hu_used: set = set()
     _cdisc = random_confusable_name(_rng, _hu_used, 1)
@@ -141,7 +149,7 @@ def generate_binding_lines(
     a(f"    {_cdisc} = [{em(vfp_hash, 'update', em('(' + vfp_tmp + ' + ' + enc(chr(10)) + ')', 'encode'))} for {vfp_tmp} in sorted({vfp_parts})]")
     a(f"    {vfp_result} = getattr({vfp_hash}, {enc('digest')})()")
     # Fold fingerprint into sm_key via HMAC
-    a(f"    {vfp_hmac} = __import__({enc('hmac')})")
+    a(f"    {vfp_hmac} = {imp_fn}({enc('hmac')})")
     a(f"    {sm_key} = getattr({vfp_hmac}, {enc('new')})({vfp_result}, {sm_key}, getattr({vfp_h}, {enc('sha256')})).digest()")
 
     # Cleanup binding locals
