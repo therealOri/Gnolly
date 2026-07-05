@@ -25,7 +25,6 @@ comes from one consistent scheme:
     different runs (or two different names within the same run) never
     produce a naming pattern an observer could exploit to correlate
     identifiers with the order they were introduced in the source.
-
 """
 from __future__ import annotations
 import random
@@ -45,7 +44,7 @@ def _rand_char(rng: random.Random) -> str:
 def random_confusable_name(rng: random.Random, used: set, length: int = 10) -> str:
     """
     Generate a length-character confusable identifier, retrying on
-    collision against used. Every returned name is added to used
+    collision against "used". Every returned name is added to "used"
     before being returned, so passing the same set across many calls
     guarantees uniqueness across all of them.
     """
@@ -58,3 +57,10 @@ def random_confusable_name(rng: random.Random, used: set, length: int = 10) -> s
         if name not in used:
             used.add(name)
             return name
+
+
+def random_confusable_char(rng: random.Random) -> str:
+    while True:
+        ch = _rand_char(rng)
+        if ch != '0':   # can't be a lone digit -> not a valid identifier
+            return ch
