@@ -10,7 +10,9 @@ produces the same fingerprint as binding.collect_fingerprint() on the
 same machine.
 """
 from __future__ import annotations
+import random
 import secrets
+from .namegen import random_confusable_name
 
 
 def generate_binding_lines(
@@ -23,6 +25,7 @@ def generate_binding_lines(
     byt_key: bytes,  # stub's bytes encoding key
     obn,             # obf_int callable
     N: list,         # name pool (we use N[60:80] for local vars)
+    rng: random.Random | None = None,  # for single-char comprehension names
 ) -> list[str]:
     """
     Return lines of Python source that:
@@ -129,12 +132,13 @@ def generate_binding_lines(
     a("        " + em(vfp_parts, "append", enc("hostname=") + " + " + vfp_hn))
     a(f"except Exception: pass")
 
-    # Hash all components
+    _rng = rng or random.Random()
+    _hu_used: set = set()
+    _cdisc = random_confusable_name(_rng, _hu_used, 1)
     a(f"if {vfp_parts}:")
     a(f"    {vfp_hash} = getattr({vfp_h}, {enc('sha256')})()")
     a(f"    getattr({vfp_hash}, {enc('update')})({domain_enc})")
-    a(f"    for {vfp_tmp} in sorted({vfp_parts}):")
-    a("        " + em(vfp_hash, "update", em("(" + vfp_tmp + " + " + enc(chr(10)) + ")", "encode")))
+    a(f"    {_cdisc} = [{em(vfp_hash, 'update', em('(' + vfp_tmp + ' + ' + enc(chr(10)) + ')', 'encode'))} for {vfp_tmp} in sorted({vfp_parts})]")
     a(f"    {vfp_result} = getattr({vfp_hash}, {enc('digest')})()")
     # Fold fingerprint into sm_key via HMAC
     a(f"    {vfp_hmac} = __import__({enc('hmac')})")
