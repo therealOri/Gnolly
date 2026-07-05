@@ -102,9 +102,9 @@ def generate_antidebug_lines(
 
     # ── Check 3: known debug modules in sys.modules ───────────────────────────
     a(f"{vm} = getattr({h_sys}, {s('modules')})")
-    for mod in _DEBUG_MODULES:
-        a(f"{vmod} = {s(mod)}")
-        a(f"if {vmod} in {vm}: {exit_call}")
+    _cm = '_' + secrets.token_hex(3)
+    _mod_list = ', '.join(s(mod) for mod in _DEBUG_MODULES)
+    a(f"if any({_cm} in {vm} for {_cm} in [{_mod_list}]): {exit_call}")
 
     # ── Check 4: settrace poisoning ───────────────────────────────────────────
     # Set a no-op trace, then immediately clear. If gettrace() still returns
