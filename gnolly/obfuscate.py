@@ -429,7 +429,7 @@ class _Transformer(ast.NodeTransformer):
         self._fstr_depth   = 0
         self._pattern_depth = 0  # track whether we're inside a match-case pattern
         self._class_depth  = 0   # track whether we're inside a class
-        self._bi_var       = None   # lazily-created builtins module handle used to obfuscate None/True/False (see _singleton() and visit_Module)
+        self._bi_var       = None  # lazily-created builtins module handle used to obfuscate None/True/False (see _singleton() and visit_Module)
 
     def _bi(self) -> str:
         """Name of the (lazily created) local builtins module handle."""
@@ -507,7 +507,20 @@ class _Transformer(ast.NodeTransformer):
         return node
 
     def visit_arg(self, node):
-        return node   # args never renamed
+        if _renameable(node.arg):
+            node.arg = self._pool.get(node.arg)
+        return node
+
+    def visit_keyword(self, node):
+        # Companion to the visit_arg above: if f's parameter "p" got
+        # renamed (because "p" collided with some unrelated name
+        # elsewhere), a call like "f(p=1)" needs its keyword name renamed
+        # the exact same way, or the call breaks with an unexpected-
+        # keyword-argument error.
+        if node.arg is not None and _renameable(node.arg):
+            node.arg = self._pool.get(node.arg)
+        node.value = self.visit(node.value)
+        return node
 
     def visit_Attribute(self, node):
         node.value = self.visit(node.value)
@@ -598,7 +611,8 @@ def obfuscate_source(
     flatten_flow:  bool = True,
 ) -> str:
     """
-    Apply all obfuscation passes to source. Returns valid Python source that compiles and executes identically to the original.
+    Apply all obfuscation passes to source.
+    Returns valid Python source that compiles and executes identically to the original.
     """
     tree = ast.parse(source)
 
