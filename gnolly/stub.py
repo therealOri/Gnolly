@@ -28,6 +28,7 @@ from .import_hook  import generate_import_hook_lines, get_core_so_hash, get_vm_s
 from .namegen import random_confusable_name
 
 
+
 def _gen_names(count: int, seed: int) -> list:
     rng = random.Random(seed)
     used: set = set()
@@ -44,30 +45,75 @@ def _make_str_key() -> bytes:
     """Generate a random 16-byte XOR key for string encoding."""
     return secrets.token_bytes(16)
 
-def _enc_str(s: str, key: bytes) -> list:
-    """Encode string as list of XOR'd ordinals."""
-    return [ord(c) ^ key[i % len(key)] for i, c in enumerate(s)]
+def _obf_int_lambda(n: int) -> str:
+    """
+    Represents a single int as a lambda call that computes it via one of
+    a few different small reversible arithmetic formulas, randomly chosen
+    per call.
+    """
+    k = secrets.randbelow(0xFFFF) + 1
+    choice = secrets.randbelow(3)
+    if choice == 0:
+        body = f"({n ^ k} ^ {k})"
+    elif choice == 1:
+        body = f"({n + k} - {k})"
+    else:
+        body = f"({n - k} + {k})"
+    return f"(lambda: {body})()"
 
-def _enc_bytes_as_str(b: bytes, key: bytes) -> list:
-    """Encode bytes as list of XOR'd values (for binary data decoded as latin-1)."""
-    return [v ^ key[i % len(key)] for i, v in enumerate(b)]
+
+def _split_int_list_expr(target: list) -> str:
+    if not target:
+        return "[]"
+    mask  = [secrets.randbelow(256) for _ in target]
+    other = [t ^ m for t, m in zip(target, mask)]
+    rng = random.Random(secrets.randbits(64))
+    used: set = set()
+    pa, pb, va, vb = (random_confusable_name(rng, used, 1) for _ in range(4))
+    mask_exprs  = ", ".join(_obf_int_lambda(m) for m in mask)
+    other_exprs = ", ".join(_obf_int_lambda(o) for o in other)
+    return (f"[(lambda {pa}, {pb}: {pa} ^ {pb})({va}, {vb}) "
+            f"for {va}, {vb} in zip([{mask_exprs}], [{other_exprs}])]")
+
+
+def _enc_str(s: str, key: bytes) -> str:
+    """
+    Encode a string as an expression (source text) that evaluates to the
+    list of XOR'd ordinals.
+    """
+    target = [ord(c) ^ key[i % len(key)] for i, c in enumerate(s)]
+    return _split_int_list_expr(target)
+
+def _enc_bytes_as_str(b: bytes, key: bytes) -> str:
+    """Encode bytes the same way (for binary data decoded as latin-1)."""
+    target = [v ^ key[i % len(key)] for i, v in enumerate(b)]
+    return _split_int_list_expr(target)
 
 def _str_decoder_lambda(fn_name: str, key: bytes) -> str:
     """
     Returns a lambda that decodes int lists back to strings.
     Uses chr() and no fromhex, no .decode(), no .hex() anywhere.
+    Parameter names are random confusable single characters rather than
+    the conventional _x/_i/_b -> those read as a small XOR-decode
+    tutorial the moment you see them.
     """
     kl = len(key)
-    return (f"{fn_name} = lambda _x: ''.join("
-            f"chr(_b ^ {repr(key)}[_i % {kl}]) "
-            f"for _i, _b in enumerate(_x))")
+    rng = random.Random(secrets.randbits(64))
+    used: set = set()
+    p_in, p_i, p_b = (random_confusable_name(rng, used, 1) for _ in range(3))
+    return (f"{fn_name} = lambda {p_in}: ''.join("
+            f"chr({p_b} ^ {repr(key)}[{p_i} % {kl}]) "
+            f"for {p_i}, {p_b} in enumerate({p_in}))")
 
 def _bytes_decoder_lambda(fn_name: str, key: bytes) -> str:
     """Returns a lambda that decodes int lists back to bytes."""
     kl = len(key)
-    return (f"{fn_name} = lambda _x: bytes("
-            f"_b ^ {repr(key)}[_i % {kl}] "
-            f"for _i, _b in enumerate(_x))")
+    rng = random.Random(secrets.randbits(64))
+    used: set = set()
+    p_in, p_i, p_b = (random_confusable_name(rng, used, 1) for _ in range(3))
+    return (f"{fn_name} = lambda {p_in}: bytes("
+            f"{p_b} ^ {repr(key)}[{p_i} % {kl}] "
+            f"for {p_i}, {p_b} in enumerate({p_in}))")
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +237,10 @@ def generate_stub(
     a(_str_decoder_lambda(s_fn,  str_key))
     a(_bytes_decoder_lambda(b_fn, byt_key))
     a(_junk_assign(N[23]))
-    a(f"{hx_fn} = lambda _s: bytes(int(_s[_i:_i+2], 16) for _i in range(0, len(_s), 2))")
+    _hx_rng = random.Random(secrets.randbits(64))
+    _hx_used: set = set()
+    _hx_s, _hx_i = (random_confusable_name(_hx_rng, _hx_used, 1) for _ in range(2))
+    a(f"{hx_fn} = lambda {_hx_s}: bytes(int({_hx_s}[{_hx_i}:{_hx_i}+2], 16) for {_hx_i} in range(0, len({_hx_s}), 2))")
     # imp_fn: alias for __import__ obtained through __builtins__ so the
     # literal string __import__ never appears in the generated stub output.
     _imp_enc = _enc_str('__import__', str_key)
@@ -241,8 +290,9 @@ def generate_stub(
     # instead of a step-by-step for-loop with three separate .append() calls.
     alpha_enc = _enc_str(alpha, str_key)
     a(f"{alpha_var} = {s_fn}({alpha_enc})")
-    a(f"{rev_var} = {{_c: _i for _i, _c in enumerate({alpha_var})}}")
     _dc_used: set = set()
+    rc1, rc2 = (random_confusable_name(rng, _dc_used, 1) for _ in range(2))
+    a(f"{rev_var} = {{{rc1}: {rc2} for {rc2}, {rc1} in enumerate({alpha_var})}}")
     cp, ct, cn, cb, ci, cx, cy = (random_confusable_name(rng, _dc_used, 1) for _ in range(7))
     a(f"def {decode_fn}({v[4]}):")
     a(f"    {cp} = " + em(v[4], "count", "chr(61)"))
@@ -264,7 +314,9 @@ def generate_stub(
     a(f"        {v[15]} = getattr({v[14]}, {s_fn}({_enc_str('_inline_cache_entries', str_key)}))")
     a(f"        {v[16]} = " + sing("True"))
     a(f"    except Exception: {v[15]} = []; {v[16]} = " + sing("False"))
-    a(f"    {v[17]} = {{_i: {v[12]}[_i] for _i in range({obn(256)})}}")
+    _oc_used: set = set()
+    oc1 = random_confusable_name(rng, _oc_used, 1)
+    a(f"    {v[17]} = {{{oc1}: {v[12]}[{oc1}] for {oc1} in range({obn(256)})}}")
     a(f"    {v[18]} = []")
     a(f"    for {v[19]} in range(0, len({v[13]}), {obn(8)}):")
     a("        " + v[20] + ", " + v[21] + " = " + em(h_struct, "unpack_from", s_fn + "(" + str(_enc_str(chr(62)+chr(73)+chr(73), str_key)) + ")", v[13], v[19]))
@@ -379,7 +431,7 @@ def generate_stub(
         for _bl in generate_binding_lines(
                 s_fn=s_fn, b_fn=b_fn, h_sys=h_sys, h_os=h_os,
                 sm_key=sm_key, str_key=str_key, byt_key=byt_key,
-                obn=obn, N=N, rng=rng):
+                obn=obn, N=N, rng=rng, imp_fn=imp_fn):
             a(_bl)
 
     # ── CYTHON IMPORT HOOKS -> both .so files required ─────────────────────────
