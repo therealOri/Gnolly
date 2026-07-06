@@ -38,16 +38,21 @@ def _obf_int_lambda(n: int) -> str:
     """
     Represents a single int as a lambda call that computes it via one of
     a few different small reversible arithmetic formulas, randomly chosen
-    per call.
+    per call
     """
     k = secrets.randbelow(0xFFFF) + 1
-    choice = secrets.randbelow(3)
+    choice = secrets.randbelow(5)
     if choice == 0:
         body = f"({n ^ k} ^ {k})"
     elif choice == 1:
         body = f"({n + k} - {k})"
-    else:
+    elif choice == 2:
         body = f"({n - k} + {k})"
+    elif choice == 3:
+        body = f"(({n * k}) // {k})"
+    else:
+        r = secrets.randbelow(k)
+        body = f"({n * k + r} // {k})"
     return f"(lambda: {body})()"
 
 
