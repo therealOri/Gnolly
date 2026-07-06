@@ -25,6 +25,7 @@ import random
 import secrets
 from pathlib import Path
 from .namegen import random_confusable_name
+from .strcodec import _enc_str
 
 
 def get_core_so_hash() -> str | None:
@@ -88,12 +89,12 @@ def generate_import_hook_lines(
     a = lines.append
 
     def enc(s: str) -> str:
-        encoded = [ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate(s)]
+        encoded = _enc_str(s, str_key)
         return f"{s_fn}({encoded})"
 
     def em(obj: str, method: str, *args: str) -> str:
         """Generate getattr(obj, enc(method))(args) -> hides method names."""
-        encoded = [ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate(method)]
+        encoded = _enc_str(method, str_key)
         arg_str = ', '.join(args)
         return f"getattr({obj}, {s_fn}({encoded}))({arg_str})"
 
@@ -196,8 +197,8 @@ def generate_import_hook_lines(
     # ── load via importlib.util ───────────────────────────────────────────────
     a(f"    {v_spec} = {em(v_iutil, 'spec_from_file_location', enc(module_stem), 'str(' + v_so + ')')}")
     a(f"    {v_mod}  = {em(v_iutil, 'module_from_spec', v_spec)}")
-    _loader_enc = str([ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate("loader")])
-    _exec_enc   = str([ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate("exec_module")])
+    _loader_enc = _enc_str("loader", str_key)
+    _exec_enc   = _enc_str("exec_module", str_key)
     a(f"    getattr(getattr({v_spec}, {s_fn}({_loader_enc})), {s_fn}({_exec_enc}))({v_mod})")
 
     if module_stem == "_gnolly_core":
@@ -211,7 +212,7 @@ def generate_import_hook_lines(
         a(f"    {vm_loader_call}({v_mod})")
 
     # ── catch-all: silent exit -> no hint about failure reason ────────────────────
-    exit_enc = [ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate('exit')]
+    exit_enc = _enc_str('exit', str_key)
     a(f"except Exception:")
     a(f"    getattr({h_sys}, {s_fn}({exit_enc}))(1)")
 
