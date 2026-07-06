@@ -13,6 +13,7 @@ from __future__ import annotations
 import random
 import secrets
 from .namegen import random_confusable_name
+from .strcodec import _enc_str, _enc_bytes_as_str
 
 
 def generate_binding_lines(
@@ -42,18 +43,18 @@ def generate_binding_lines(
 
     def enc(s: str) -> str:
         """Encode string s as s_fn([...]) call."""
-        encoded = [ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate(s)]
+        encoded = _enc_str(s, str_key)
         return f"{s_fn}({encoded})"
 
     def em(obj: str, method: str, *args: str) -> str:
         """Generate getattr(obj, s_fn(encoded_method))(args) -> hides method names."""
-        encoded = [ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate(method)]
+        encoded = _enc_str(method, str_key)
         arg_str = ', '.join(args)
         return f"getattr({obj}, {s_fn}({encoded}))({arg_str})"
 
     def encb(b: bytes) -> str:
         """Encode bytes as b_fn([...]) call."""
-        encoded = [v ^ byt_key[i % len(byt_key)] for i, v in enumerate(b)]
+        encoded = _enc_bytes_as_str(b, byt_key)
         return f"{b_fn}({encoded})"
 
     # Local variable names from the pool (slots 60-79)
