@@ -26,6 +26,11 @@ from .antidebug import generate_antidebug_lines, generate_timing_check_lines
 from .binding_stub import generate_binding_lines
 from .import_hook  import generate_import_hook_lines, get_core_so_hash, get_vm_so_hash
 from .namegen import random_confusable_name
+from .strcodec import (
+    _obf_int_lambda, _split_int_list_expr,
+    _enc_str, _enc_bytes_as_str,
+    _str_decoder_lambda, _bytes_decoder_lambda,
+)
 
 
 
@@ -40,80 +45,14 @@ def _gen_names(count: int, seed: int) -> list:
 # ---------------------------------------------------------------------------
 # Custom string encoding  (replaces bytes.fromhex pattern entirely)
 # ---------------------------------------------------------------------------
+# _enc_str / _enc_bytes_as_str / _str_decoder_lambda / _bytes_decoder_lambda /
+# _split_int_list_expr / _obf_int_lambda all now live in gnolly.strcodec, so
+# every stub-generating file (this one, antidebug.py, import_hook.py,
+# binding_stub.py) shares the exact same implementation.
 
 def _make_str_key() -> bytes:
     """Generate a random 16-byte XOR key for string encoding."""
     return secrets.token_bytes(16)
-
-def _obf_int_lambda(n: int) -> str:
-    """
-    Represents a single int as a lambda call that computes it via one of
-    a few different small reversible arithmetic formulas, randomly chosen
-    per call.
-    """
-    k = secrets.randbelow(0xFFFF) + 1
-    choice = secrets.randbelow(3)
-    if choice == 0:
-        body = f"({n ^ k} ^ {k})"
-    elif choice == 1:
-        body = f"({n + k} - {k})"
-    else:
-        body = f"({n - k} + {k})"
-    return f"(lambda: {body})()"
-
-
-def _split_int_list_expr(target: list) -> str:
-    if not target:
-        return "[]"
-    mask  = [secrets.randbelow(256) for _ in target]
-    other = [t ^ m for t, m in zip(target, mask)]
-    rng = random.Random(secrets.randbits(64))
-    used: set = set()
-    pa, pb, va, vb = (random_confusable_name(rng, used, 1) for _ in range(4))
-    mask_exprs  = ", ".join(_obf_int_lambda(m) for m in mask)
-    other_exprs = ", ".join(_obf_int_lambda(o) for o in other)
-    return (f"[(lambda {pa}, {pb}: {pa} ^ {pb})({va}, {vb}) "
-            f"for {va}, {vb} in zip([{mask_exprs}], [{other_exprs}])]")
-
-
-def _enc_str(s: str, key: bytes) -> str:
-    """
-    Encode a string as an expression (source text) that evaluates to the
-    list of XOR'd ordinals.
-    """
-    target = [ord(c) ^ key[i % len(key)] for i, c in enumerate(s)]
-    return _split_int_list_expr(target)
-
-def _enc_bytes_as_str(b: bytes, key: bytes) -> str:
-    """Encode bytes the same way (for binary data decoded as latin-1)."""
-    target = [v ^ key[i % len(key)] for i, v in enumerate(b)]
-    return _split_int_list_expr(target)
-
-def _str_decoder_lambda(fn_name: str, key: bytes) -> str:
-    """
-    Returns a lambda that decodes int lists back to strings.
-    Uses chr() and no fromhex, no .decode(), no .hex() anywhere.
-    Parameter names are random confusable single characters rather than
-    the conventional _x/_i/_b -> those read as a small XOR-decode
-    tutorial the moment you see them.
-    """
-    kl = len(key)
-    rng = random.Random(secrets.randbits(64))
-    used: set = set()
-    p_in, p_i, p_b = (random_confusable_name(rng, used, 1) for _ in range(3))
-    return (f"{fn_name} = lambda {p_in}: ''.join("
-            f"chr({p_b} ^ {repr(key)}[{p_i} % {kl}]) "
-            f"for {p_i}, {p_b} in enumerate({p_in}))")
-
-def _bytes_decoder_lambda(fn_name: str, key: bytes) -> str:
-    """Returns a lambda that decodes int lists back to bytes."""
-    kl = len(key)
-    rng = random.Random(secrets.randbits(64))
-    used: set = set()
-    p_in, p_i, p_b = (random_confusable_name(rng, used, 1) for _ in range(3))
-    return (f"{fn_name} = lambda {p_in}: bytes("
-            f"{p_b} ^ {repr(key)}[{p_i} % {kl}] "
-            f"for {p_i}, {p_b} in enumerate({p_in}))")
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +162,9 @@ def generate_stub(
     def em(obj: str, method: str, *args: str) -> str:
         """Generate getattr(obj, s_fn(encoded_method))(args) call string.
         Used to hide all method names from the generated stub output."""
-        enc = [ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate(method)]
+        enc = _enc_str(method, str_key)
         arg_str = ', '.join(args)
-        return f"getattr({obj}, {s_fn}({enc}))({arg_str})" 
+        return f"getattr({obj}, {s_fn}({enc}))({arg_str})"
 
     lines = []
     a = lines.append
