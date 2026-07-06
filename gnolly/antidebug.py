@@ -24,6 +24,7 @@ from __future__ import annotations
 import random
 import secrets
 from .namegen import random_confusable_name
+from .strcodec import _enc_str
 
 
 # Known debugger / analysis module names -> encoded so they don't appear plaintext
@@ -40,11 +41,6 @@ _DEBUG_MODULES = [
     'pywin32trace',     # Windows debug tracing
 ]
 # can always add more.
-
-def _enc_list(strings: list[str], key: bytes) -> list[list[int]]:
-    """Encode a list of strings as int-lists using the stub's str_key."""
-    return [[ord(c) ^ key[i % len(key)] for i, c in enumerate(s)]
-            for s in strings]
 
 
 def generate_antidebug_lines(
@@ -67,8 +63,8 @@ def generate_antidebug_lines(
     lines = []
     a = lines.append
 
-    def enc(s: str) -> list:
-        return [ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate(s)]
+    def enc(s: str) -> str:
+        return _enc_str(s, str_key)
 
     def s(text: str) -> str:
         return f"{s_fn}({enc(text)})"
@@ -157,8 +153,8 @@ def generate_timing_check_lines(
     lines = []
     a = lines.append
 
-    def enc(s: str) -> list:
-        return [ord(c) ^ str_key[i % len(str_key)] for i, c in enumerate(s)]
+    def enc(s: str) -> str:
+        return _enc_str(s, str_key)
 
     def s(text: str) -> str:
         return f"{s_fn}({enc(text)})"
