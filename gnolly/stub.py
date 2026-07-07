@@ -180,10 +180,15 @@ def generate_stub(
     _hx_used: set = set()
     _hx_s, _hx_i = (random_confusable_name(_hx_rng, _hx_used, 1) for _ in range(2))
     a(f"{hx_fn} = lambda {_hx_s}: bytes(int({_hx_s}[{_hx_i}:{_hx_i}+2], 16) for {_hx_i} in range(0, len({_hx_s}), 2))")
-    # imp_fn: alias for __import__ obtained through __builtins__ so the
-    # literal string __import__ never appears in the generated stub output.
+    # imp_fn: alias for __import__ obtained through builtins, itself
+    # obtained via globals()['__builtins__'] rather than the bare name
+    # __builtins__.
     _imp_enc = _enc_str('__import__', str_key)
-    a(f"{imp_fn} = getattr(__builtins__, {s_fn}({_imp_enc})) if not isinstance(__builtins__, dict) else __builtins__[{s_fn}({_imp_enc})]")
+    _blt_key_enc = _enc_str('__builtins__', str_key)
+    _gb_rng = random.Random(secrets.randbits(64))
+    _tmp_blt = random_confusable_name(_gb_rng, set(), 6)
+    a(f"{_tmp_blt} = globals()[{s_fn}({_blt_key_enc})]")
+    a(f"{imp_fn} = getattr({_tmp_blt}, {s_fn}({_imp_enc})) if not isinstance({_tmp_blt}, dict) else {_tmp_blt}[{s_fn}({_imp_enc})]")
     a(f"{h_blt} = {imp_fn}({s_fn}({_enc_str('builtins', str_key)}))")
     a("")
 
@@ -297,9 +302,6 @@ def generate_stub(
     dv_enc       = _enc_str('decrypt_and_verify', str_key)
     decomp_enc   = _enc_str('decompress', str_key)
     loads_enc    = _enc_str('loads', str_key)
-    name_enc     = _enc_str('__name__', str_key)
-    main_enc     = _enc_str('__main__', str_key)
-    blt_enc      = _enc_str('__builtins__', str_key)
     ic_enc       = _enc_str('_inline_cache_entries', str_key)
     opcode_enc   = _enc_str('opcode', str_key)
     gnolly_key_enc  = _enc_str('GNOLLY_KEY', str_key)
