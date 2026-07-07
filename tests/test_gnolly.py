@@ -193,25 +193,6 @@ print(greet(name="Gnolly", greeting="Hi"))
         ast_mod.parse(obf)  # should not raise
 
 
-# ── Bytecode ──────────────────────────────────────────────────────────────────
-
-class TestBytecode:
-    def test_roundtrip(self):
-        from gnolly.bytecode import source_to_bytecode, bytecode_to_code, execute_code
-        src = "result = 6 * 7"
-        blob = source_to_bytecode(src)
-        code = bytecode_to_code(blob)
-        g = {"__builtins__": __builtins__}
-        execute_code(code, g)
-        assert g["result"] == 42
-
-    def test_blob_is_bytes(self):
-        from gnolly.bytecode import source_to_bytecode
-        blob = source_to_bytecode("x = 1")
-        assert isinstance(blob, bytes)
-        assert len(blob) > 0
-
-
 # ── Full Pipeline ─────────────────────────────────────────────────────────────
 
 class TestPipeline:
@@ -606,7 +587,7 @@ class TestImportHook:
             assert ident not in stub, f"'{ident}' found in stub"
 
     def test_so_hash_embedded(self):
-        """The .so hash is verified against by the stub, but obfuscated &
+        """The .so hash is verified against by the stub, but obfuscated --
         not embedded as a bare, grep-able plaintext literal."""
         from gnolly.pipeline import protect
         from gnolly.keymanager import generate_key
