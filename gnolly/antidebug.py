@@ -77,6 +77,13 @@ def generate_antidebug_lines(
             return name
         return f"getattr({h_blt}, {s(name)})"
 
+    def globals_call() -> str:
+        """globals() via the already-established builtins handle, falls back to a bare
+        globals() call only if the caller didn't wire up h_blt."""
+        if h_blt is None:
+            return "globals()"
+        return f"getattr({h_blt}, {s('globals')})()"
+
     # Temp var names -> confusable characters
     _tv_rng = random.Random(secrets.randbits(64))
     _tv_used: set = set()
@@ -124,11 +131,11 @@ def generate_antidebug_lines(
     # Some debug injectors set __spec__.loader to a custom object.
     # Legitimate scripts either have None or a standard loader.
     a(f"try:")
-    a(f"    {vmod} = __spec__")
+    a(f"    {vmod} = {globals_call()}.get({s('__spec__')}, {sing('None')})")
     a(f"    if {vmod} is not {sing('None')}:")
     a(f"        {vt} = getattr({vmod}, {s('loader')}, {sing('None')})")
     a(f"        if {vt} is not {sing('None')}:")
-    a(f"            {vp} = type({vt}).__name__")
+    a(f"            {vp} = getattr(type({vt}), {s('__name__')})")
     a(f"            if any(x in {vp} for x in [{s('Debug')}, {s('Inject')}, {s('Hook')}]):")
     a(f"                {exit_call}")
     a(f"except Exception: pass")
