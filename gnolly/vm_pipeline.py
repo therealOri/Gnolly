@@ -36,7 +36,8 @@ def protect_with_vm(
     filename: str,
     key: bytes,
     *,
-    fallback_fn=None
+    fallback_fn=None,
+    inject_junk: bool = True,
 ) -> tuple[bytes, bytes] | None:
     """
     Attempt to translate source through the GIR VM pipeline.
@@ -46,10 +47,15 @@ def protect_with_vm(
 
     key:
         per-file encryption key (used to derive the VM shuffle table).
+    inject_junk:
+        emit real GIR-level junk instructions alongside the translated
+        code (see vm_translate.py) -> distinct from and in addition to
+        the AST-level dead code obfuscate.py already injects before
+        compilation.
     """
     try:
         code_obj = compile(source, filename, "exec", optimize=1)
-        gir = translate_module(code_obj)
+        gir = translate_module(code_obj, inject_junk=inject_junk)
     except VMUnsupportedError as exc:
         if fallback_fn is not None:
             fallback_fn(exc)
