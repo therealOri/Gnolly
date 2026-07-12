@@ -63,6 +63,7 @@ def protect(
     obf_strings: bool = True,
     inject_dead: bool = True,
     obf_numbers: bool = True,
+    inject_junk: bool = True,
     machine_fingerprint: bytes | None = None,
     seed: int | None = None,
     verbose: bool = False,
@@ -75,9 +76,11 @@ def protect(
     password        : bytes key for AES-256-GCM encryption
     filename        : reported filename in compile() tracebacks
     mangle_names    : toggle AST name mangling
-    obf_strings     : toggle string literal hex-encoding
-    inject_dead     : toggle dead-code injection
+    obf_strings     : toggle string/bytes/float keyed encoding (gnolly.strcodec scheme)
+    inject_dead     : toggle AST-level dead-code injection (before compilation)
     obf_numbers     : toggle integer XOR obfuscation
+    inject_junk     : toggle GIR-level junk instruction injection (after compilation,
+                      alongside the translated bytecode -> see vm_translate.py)
     seed            : fixed RNG seed for reproducible output (None = random)
     verbose         : print stage progress to stderr
     machine_fingerprint : 32-byte fingerprint from binding.collect_fingerprint().
@@ -117,6 +120,7 @@ def protect(
         filename=filename,
         key=vm_key,
         fallback_fn=_vm_fallback,
+        inject_junk=inject_junk,
     )
     if result is None:
         # protect_with_vm already called _vm_fallback which exits, but
