@@ -31,6 +31,7 @@ this and raises an error -> see gnolly.pipeline.
 """
 from __future__ import annotations
 import dis
+import secrets
 import types
 
 from .vm_isa import GIR_OPS, CMP_OPS as _CMP_OPS
@@ -51,6 +52,115 @@ _UNSUPPORTED_OPS = frozenset([
 _CO_GENERATOR  = 0x20
 _CO_COROUTINE  = 0x80
 _CO_ASYNC_GEN  = 0x200
+
+
+# ---------------------------------------------------------------------------
+# Junk opcode injection
+# ---------------------------------------------------------------------------
+# Real GIR-level junk, distinct from the AST-level dead code obfuscate.py
+# already injects before compilation. This operates directly on the
+# translated instruction stream, in two ways:
+#
+#   1. "Dead zone" filler, placed immediately after instructions that
+#      unconditionally end a control-flow path (return, unconditional
+#      jump, raise/reraise). The interpreter never falls through past
+#      any of these -> return/raise unconditionally exit run_frame, and
+#      an unconditional jump overwrites the instruction pointer outright
+#      -> so this filler can genuinely never execute, and can be as
+#      liberal as we like (NOPs or junk blocks) with zero runtime cost.
+#
+#   2. Reachable junk, interspersed between ordinary instructions at a
+#      low, randomised rate. This DOES execute for real on every run, so
+#      it's deliberately built from operations that can be proven safe
+#      without knowing the exact stack contents at that point: every
+#      variant only ever pushes a value it just created itself (a fresh
+#      constant, or an empty/one-item container built from nothing) and
+#      immediately discards it with POP_TOP. None of them read, in any
+#      way, whatever was already on the stack -> so correctness doesn't
+#      depend on tracking stack depth at each injection point, only on
+#      each block's own net stack effect being exactly zero, which is
+#      true by construction for all six shapes below.
+#
+# Junk instructions are emitted via ctx.emit() only, never ctx.mark() ->
+# they get no entry in offset_to_index, so they're invisible to jump
+# target and exception table resolution. The next real instruction's own
+# ctx.mark() call naturally records its position *after* any injected
+# junk, so every existing jump/exception-range computation stays correct
+# without any special-casing.
+#
+# Both injection rates are intentionally well under 100% and the exact
+# shape used is randomised -> a uniform "there's always a junk block
+# between every two real instructions" pattern would itself be a trivial
+# signature to filter out programmatically. Varying both whether and what
+# means there's no single fixed pattern to strip.
+
+_TERMINAL_OPS = frozenset([
+    "RETURN_VALUE", "RETURN_CONST",
+    "JUMP", "JUMP_FORWARD", "JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT",
+    "RAISE_VARARGS", "RERAISE",
+])
+
+_JUNK_REACHABLE_RATE = 0.15    # chance of injecting after any given real instruction
+_JUNK_DEADZONE_RATE  = 0.55    # chance of injecting after a terminal instruction
+_JUNK_DEADZONE_MAX   = 5       # max chained junk blocks in one dead zone
+
+
+def _junk_const():
+    """A small throwaway constant, added fresh to the pool -> only ever
+    pushed by injected junk and immediately discarded again, never
+    observed by any real instruction."""
+    c = secrets.randbelow(4)
+    if c == 0:
+        return secrets.randbelow(2_000_000) - 1_000_000
+    elif c == 1:
+        return secrets.token_hex(secrets.randbelow(6) + 2)
+    elif c == 2:
+        return secrets.token_bytes(secrets.randbelow(6) + 2)
+    else:
+        return round(secrets.randbelow(2_000_000) / 997.0, 4)
+
+
+def _emit_junk_block(ctx):
+    """
+    Emit one net-zero-stack-effect, side-effect-free instruction sequence.
+    Every shape only pushes values it just created and immediately pops
+    them -> never reads pre-existing stack content, so it's safe
+    regardless of the actual stack depth/contents at this point.
+    """
+    shape = secrets.randbelow(6)
+    if shape == 0:
+        ctx.emit("BUILD_TUPLE", 0); ctx.emit("POP_TOP")
+    elif shape == 1:
+        ctx.emit("BUILD_LIST", 0); ctx.emit("POP_TOP")
+    elif shape == 2:
+        ctx.emit("BUILD_MAP", 0); ctx.emit("POP_TOP")
+    elif shape == 3:
+        idx = len(ctx.consts); ctx.consts.append(_junk_const())
+        ctx.emit("LOAD_CONST", idx); ctx.emit("POP_TOP")
+    elif shape == 4:
+        i1 = len(ctx.consts); ctx.consts.append(_junk_const())
+        i2 = len(ctx.consts); ctx.consts.append(_junk_const())
+        ctx.emit("LOAD_CONST", i1); ctx.emit("LOAD_CONST", i2)
+        ctx.emit("BUILD_TUPLE", 2); ctx.emit("POP_TOP")
+    else:
+        idx = len(ctx.consts); ctx.consts.append(_junk_const())
+        ctx.emit("LOAD_CONST", idx)
+        ctx.emit("BUILD_LIST", 1); ctx.emit("POP_TOP")
+
+
+def _maybe_inject_reachable(ctx):
+    if secrets.randbelow(1000) < int(_JUNK_REACHABLE_RATE * 1000):
+        _emit_junk_block(ctx)
+
+
+def _maybe_inject_deadzone(ctx):
+    if secrets.randbelow(1000) < int(_JUNK_DEADZONE_RATE * 1000):
+        n = secrets.randbelow(_JUNK_DEADZONE_MAX) + 1
+        for _ in range(n):
+            if secrets.randbelow(3) == 0:
+                ctx.emit("NOP")
+            else:
+                _emit_junk_block(ctx)
 
 
 
@@ -182,23 +292,24 @@ class _JumpRef:
         self.target_offset = target_offset
 
 
-def _translate_const(value):
+def _translate_const(value, inject_junk=True):
     if isinstance(value, types.CodeType) or type(value).__name__ == 'code':
-        return translate_code(value)
+        return translate_code(value, inject_junk=inject_junk)
     if isinstance(value, tuple):
-        return tuple(_translate_const(v) for v in value)
+        return tuple(_translate_const(v, inject_junk) for v in value)
     if isinstance(value, frozenset):
-        return frozenset(_translate_const(v) for v in value)
+        return frozenset(_translate_const(v, inject_junk) for v in value)
     return value
 
 
 class _FuncCtx:
-    def __init__(self, code):
+    def __init__(self, code, inject_junk=True):
         self.code = code
+        self.inject_junk = inject_junk
         self.gir = []
         self.offset_to_index = {}
         self._pending_offsets = []
-        self.consts = [_translate_const(c) for c in code.co_consts]
+        self.consts = [_translate_const(c, inject_junk) for c in code.co_consts]
         self.names = list(code.co_names)
         self.varnames = list(code.co_varnames)
         self.cellvars = list(code.co_cellvars)
@@ -395,10 +506,14 @@ def _compute_flags(code):
     return flags
 
 
-def translate_code(code):
+def translate_code(code, inject_junk=True):
     """Translate one CPython code object (and all nested code objects) to GIR."""
-    ctx = _FuncCtx(code)
+    ctx = _FuncCtx(code, inject_junk)
     instrs = list(dis.get_instructions(code, show_caches=False))
+
+    # Reachable junk is restricted to non-generator/coroutine/async-generator
+    # code objects. Injecting into said generators made things inconsistent or break.
+    is_gen = bool(code.co_flags & (_CO_GENERATOR | _CO_COROUTINE | _CO_ASYNC_GEN))
 
     for instr in instrs:
         if instr.opname == "EXTENDED_ARG":
@@ -407,16 +522,28 @@ def translate_code(code):
         ctx.mark(instr.offset)
         ctx.add_line(_instr_lineno(instr))
         _translate_one(ctx, instr)
+        if inject_junk:
+            if instr.opname in _TERMINAL_OPS:
+                _maybe_inject_deadzone(ctx)
+            elif not is_gen:
+                _maybe_inject_reachable(ctx)
 
     _fix_jumps(ctx)
     _build_exc_table(ctx)
+
+    # Junk sequences transiently touch the stack (peak +2, always back to
+    # net 0) beyond whatever CPython's own co_stacksize accounted for.
+    # The VM doesn't actually pre-allocate a fixed-capacity stack from
+    # this value (it's a plain growable list), so this isn't a
+    # correctness requirement.
+    stacksize = max(code.co_stacksize, 1) + (2 if inject_junk else 0)
 
     return GIRCode(
         argcount=code.co_argcount,
         posonlyargcount=code.co_posonlyargcount,
         kwonlyargcount=code.co_kwonlyargcount,
         nlocals=len(ctx.varnames),
-        stacksize=max(code.co_stacksize, 1),
+        stacksize=stacksize,
         flags=_compute_flags(code),
         firstlineno=code.co_firstlineno,
         name=code.co_name,
