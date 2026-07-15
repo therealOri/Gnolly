@@ -1237,6 +1237,12 @@ def run_frame(GIRCodeObj code, list fastlocals, list cells, dict globs, dict bui
                     stack.pop(); stack.pop()   # unknown intrinsic -> drop args, push nothing meaningful
                     stack.append(None)
 
+            elif op == OP_END_ASYNC_FOR:
+                exc = stack.pop()
+                stack.pop()  # the async iterator/awaitable, discarded either way
+                if not isinstance(exc, StopAsyncIteration):
+                    raise exc
+
             elif op == OP_CONVERT_VALUE:
                 val = stack.pop()
                 if arg == 1:
@@ -1403,6 +1409,7 @@ cdef enum:
     OP_LOAD_SUPER_ATTR   = 99
     OP_CHECK_EG_MATCH    = 100
     OP_CALL_INTRINSIC_2  = 101
+    OP_END_ASYNC_FOR     = 102
 
 # Internal sentinel -> raised by run_gen_frame() to signal a yield.
 # Never escapes to user code.
@@ -2297,6 +2304,12 @@ cdef void _run_one_op(
         else:
             stack.pop(); stack.pop()
             stack.append(None)
+
+    elif op == OP_END_ASYNC_FOR:
+        exc = stack.pop()
+        stack.pop()
+        if not isinstance(exc, StopAsyncIteration):
+            raise exc
 
     elif op == OP_BEFORE_WITH:
         cm = stack.pop()
