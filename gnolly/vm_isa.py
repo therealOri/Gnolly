@@ -263,6 +263,7 @@ GIR_OPS.update({
     "LOAD_SUPER_ATTR":      99,   # arg: (name_idx << 2) | (two_arg << 1) | method_flag
     "CHECK_EG_MATCH":      100,   # except* type match: pop(match_type, exc_value) -> push(rest, match)
     "CALL_INTRINSIC_2":    101,   # arg=1: INTRINSIC_PREP_RERAISE_STAR (used to implement except*)
+    "END_ASYNC_FOR":       102,   # pop(awaitable, exc): if isinstance(exc, StopAsyncIteration) -> discard both, else re-raise exc
 })
 
 # Update opname reverse map
