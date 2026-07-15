@@ -1666,9 +1666,9 @@ cdef class _GIRAsyncGenASend:
             raise StopAsyncIteration from e
         except StopAsyncIteration:
             raise
-        except BaseException as e:
+        except BaseException:
             frame.exhausted = True
-            raise StopAsyncIteration from e
+            raise
         if did_return:
             resume_ip = frame.ip
             resume_arg = -1
@@ -1842,7 +1842,7 @@ def run_gen_frame(
                     # Sub-iterator exhausted: pop it, push return value, jump past loop.
                     stack.pop()  # pop sub_iter
                     stack.append(e.value if e.args else None)
-                    ip += arg
+                    ip = arg
 
             elif op == OP_END_SEND:
                 # Result of SEND is already on stack; nothing to do.
@@ -1879,8 +1879,16 @@ def run_gen_frame(
             elif op == OP_CALL_INTRINSIC_1:
                 if arg == INTRINSIC_STOPITERATION_ERROR:
                     exc_val = stack.pop() if stack else None
-                    si = StopIteration(exc_val) if exc_val is not None else StopIteration()
-                    raise si
+                    if isinstance(exc_val, StopIteration):
+                        msg = ("async generator raised StopIteration"
+                               if frame.is_async_gen else
+                               "generator raised StopIteration")
+                        new_exc = RuntimeError(msg)
+                        new_exc.__cause__ = exc_val
+                        new_exc.__context__ = exc_val
+                        stack.append(new_exc)
+                    else:
+                        stack.append(exc_val)
                 elif arg == INTRINSIC_ASYNC_GEN_ASEND:
                     # Wrap TOS in async gen asend marker -> pass through for our runtime.
                     pass  # value stays on stack
