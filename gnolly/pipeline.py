@@ -38,6 +38,7 @@ from .compress    import compress
 from .crypto      import encrypt, _MAGIC, _VERSION, _SALT_LEN, _IV_LEN, _TAG_LEN
 from .encoding    import GnollyCodec
 from .stub        import generate_stub
+from .minify      import minify_source
 from .build_core  import ensure_core
 from .binding     import bind_salt, collect_fingerprint, fingerprint_from_hex
 from .integrity   import collect_runtime_hashes, fold_integrity
@@ -67,6 +68,8 @@ def protect(
     machine_fingerprint: bytes | None = None,
     verbose: bool = False,
     silent: bool = True,
+    flatten: bool = True,
+    minify: bool = False,
 ) -> str:
     """
     Parameters
@@ -84,6 +87,11 @@ def protect(
     machine_fingerprint : 32-byte fingerprint from binding.collect_fingerprint().
                       When set, the file will only decrypt on the bound machine.
     silent          : suppress ALL error output from the protected stub (default: True).
+    flatten         : toggle control-flow flattening of the generated stub
+                      (opaque dispatch-loop state machine -> see gnolly.flatten).
+    minify          : toggle post-generation minification of the stub
+                      (see gnolly.minify). Off by default since it's an
+                      extra, separate pass; enable via --minify on the CLI.
     """
     def _log(msg: str) -> None:
         if verbose:
@@ -171,7 +179,11 @@ def protect(
         use_vm          = True,
         bound           = (machine_fingerprint is not None),
         silent          = silent,
+        flatten         = flatten,
     )
+    if minify:
+        _log("Minifying stub …")
+        stub_source = minify_source(stub_source)
     return stub_source
 
 
