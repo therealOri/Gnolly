@@ -14,7 +14,7 @@ Stub hardening layers:
   8. Integer XOR obfuscation         (no plain numeric constants)
   9. All string literals as basic int lists (chr(n^key) with no hex/decode pattern)
 
-Random policy: random.Random(seed) for reproducible structural layout only.
+Random policy: random.SystemRandom() for structural layout, every run.
 All values use secrets.
 """
 from __future__ import annotations
@@ -34,8 +34,8 @@ from .strcodec import (
 
 
 
-def _gen_names(count: int, seed: int) -> list:
-    rng = random.Random(seed)
+def _gen_names(count: int) -> list:
+    rng = random.SystemRandom()
     used: set = set()
     names = [random_confusable_name(rng, used, length=11) for _ in range(count)]
     rng.shuffle(names)
@@ -113,11 +113,10 @@ def generate_stub(
     use_vm: bool = True,
     shuffle_opcodes: bool = True,   # kept for API compat; ignored when use_vm=True
     bound: bool = False,
-    seed: int = 0,
     silent: bool = True,
 ) -> str:
-    rng = random.Random(seed)
-    N   = _gen_names(150, seed)
+    rng = random.SystemRandom()
+    N   = _gen_names(150)
 
     # String encoding key (different from payload xor_key)
     str_key  = _make_str_key()
