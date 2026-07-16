@@ -7,7 +7,6 @@ clear
 pip install pycryptodome cython
 python setup.py build_ext --inplace
 pip install .
-python -m gnolly.verify
 
 
 # Clean up!
