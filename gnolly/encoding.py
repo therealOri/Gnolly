@@ -22,11 +22,11 @@ _BITS = 6   # log2(64); we'll use 64-char subsets for a clean base-64 variant
 _MASK = (1 << _BITS) - 1   # 0x3F
 
 
-def _make_alphabet(seed: bytes) -> str:
-    """Deterministically shuffle the alphabet using HMAC-SHA256 of seed."""
-    h = hashlib.sha256(seed).digest()
-    # Extend seed material for Fisher-Yates using SHAKE-256 for arbitrary length
-    xof = hashlib.shake_256(seed)
+def _make_alphabet(key_material: bytes) -> str:
+    """Deterministically shuffle the alphabet using HMAC-SHA256 of key_material."""
+    h = hashlib.sha256(key_material).digest()
+    # Extend key_material for Fisher-Yates using SHAKE-256 for arbitrary length
+    xof = hashlib.shake_256(key_material)
     stream = xof.digest(512)  # more than enough entropy for 88 chars
 
     chars = list(_BASE_ALPHABET)
@@ -62,12 +62,12 @@ class GnollyCodec:
     (same ratio as base64 but with a per-file alphabet).
     """
 
-    def __init__(self, seed: bytes):
-        self._alpha = _make_alphabet(seed)
+    def __init__(self, key_material: bytes):
+        self._alpha = _make_alphabet(key_material)
         # Build reverse lookup
         self._reverse = {c: i for i, c in enumerate(self._alpha)}
-        # Derive a secondary XOR spread key from the seed
-        self._xor_key = hashlib.sha256(b"gnolly-spread:" + seed).digest()[:16]
+        # Derive a secondary XOR spread key from the same key material
+        self._xor_key = hashlib.sha256(b"gnolly-spread:" + key_material).digest()[:16]
 
     def encode(self, data: bytes) -> str:
         """Encode bytes -> string using the seeded alphabet."""
