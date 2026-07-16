@@ -61,7 +61,7 @@ def protect_package(
     pattern       : glob pattern to select files (default: all .py files)
     exclude       : list of glob patterns to exclude (e.g. ['**/test_*.py'])
     verbose       : print progress
-    protect_kwargs: forwarded to protect() (seed, mangle_names, etc.)
+    protect_kwargs: forwarded to protect() (mangle_names, obf_strings, etc.)
 
     Returns
     -------
