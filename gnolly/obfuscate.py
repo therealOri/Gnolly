@@ -23,11 +23,13 @@ NOT RENAMED: method names (accessed via .attr -> can't know the type),
 
 Random policy
 --------------
-random.Random(seed) — deterministic structural choices (flatten state values
-                       order, dead-code injection positions) so --seed N gives
-                       reproducible output.
-secrets             — all actual embedded numeric values (XOR keys, state
-                       numbers, noise constants) use crypto-random every run.
+random.SystemRandom() — structural choices (flatten state values order,
+                         dead-code injection positions) are cryptographically
+                         random every run. There is no way, internal or
+                         external, to reproduce the same structural layout
+                         twice.
+secrets               — all actual embedded numeric values (XOR keys, state
+                         numbers, noise constants) use crypto-random every run.
 """
 from __future__ import annotations
 import ast
@@ -45,8 +47,8 @@ _NAME_LEN = 12
 
 
 class _NamePool:
-    def __init__(self, seed: int = 0):
-        self._rng = random.Random(seed)
+    def __init__(self):
+        self._rng = random.SystemRandom()
         self._used: set = set()
         self.map: dict[str, str] = {}
 
@@ -134,21 +136,138 @@ class _Collector(ast.NodeVisitor):
 # Passes 3 & 4 -> Constant encryption helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _enc_str(s: str) -> ast.expr:
-    hex_s = s.encode("utf-8").hex()
-    # Polymorphic: alternate between bytes and bytearray
-    use_bytes = secrets.randbelow(2) == 0
-    obj_name  = "bytes" if use_bytes else "bytearray"
-    decode_args = [ast.Constant(value="utf-8")] if use_bytes else []
-    return ast.Call(
-        func=ast.Attribute(
-            value=ast.Call(
-                func=ast.Attribute(
-                    value=ast.Name(id=obj_name, ctx=ast.Load()),
-                    attr="fromhex", ctx=ast.Load()),
-                args=[ast.Constant(value=hex_s)], keywords=[]),
-            attr="decode", ctx=ast.Load()),
-        args=decode_args, keywords=[])
+def _obf_int_lambda_ast(n: int) -> ast.expr:
+    """
+    AST equivalent of gnolly.strcodec._obf_int_lambda: represents a
+    single int as an immediately-invoked lambda that computes it via one
+    of several small reversible arithmetic formulas, randomly chosen per
+    call.
+    """
+    k = secrets.randbelow(0xFFFF) + 1
+    choice = secrets.randbelow(5)
+    if choice == 0:
+        body = ast.BinOp(left=ast.Constant(value=n ^ k), op=ast.BitXor(),
+                          right=ast.Constant(value=k))
+    elif choice == 1:
+        body = ast.BinOp(left=ast.Constant(value=n + k), op=ast.Sub(),
+                          right=ast.Constant(value=k))
+    elif choice == 2:
+        body = ast.BinOp(left=ast.Constant(value=n - k), op=ast.Add(),
+                          right=ast.Constant(value=k))
+    elif choice == 3:
+        body = ast.BinOp(left=ast.Constant(value=n * k), op=ast.FloorDiv(),
+                          right=ast.Constant(value=k))
+    else:
+        r = secrets.randbelow(k)
+        body = ast.BinOp(left=ast.Constant(value=n * k + r), op=ast.FloorDiv(),
+                          right=ast.Constant(value=k))
+    lam = ast.Lambda(
+        args=ast.arguments(posonlyargs=[], args=[], vararg=None,
+                            kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+        body=body)
+    return ast.Call(func=lam, args=[], keywords=[])
+
+
+def _split_int_list_ast(target: list) -> ast.expr:
+    """
+    AST equivalent of gnolly.strcodec._split_int_list_expr: an expression
+    that evaluates to "target" at runtime without ever containing "target"
+    or any of its individual values as a literal anywhere. Splits
+    into two independently-random component lists (mask, other = target
+    XOR mask), each element of which is itself an _obf_int_lambda_ast()
+    call, recombined via a lambda inside a zip()-based comprehension.
+    """
+    if not target:
+        return ast.List(elts=[], ctx=ast.Load())
+    mask  = [secrets.randbelow(256) for _ in target]
+    other = [t ^ m for t, m in zip(target, mask)]
+    rng = random.Random(secrets.randbits(64))
+    used: set = set()
+    pa, pb, va, vb = (random_confusable_name(rng, used, 1) for _ in range(4))
+
+    mask_list  = ast.List(elts=[_obf_int_lambda_ast(m) for m in mask], ctx=ast.Load())
+    other_list = ast.List(elts=[_obf_int_lambda_ast(o) for o in other], ctx=ast.Load())
+
+    combine_lam = ast.Lambda(
+        args=ast.arguments(
+            posonlyargs=[], args=[ast.arg(arg=pa), ast.arg(arg=pb)],
+            vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+        body=ast.BinOp(left=ast.Name(id=pa, ctx=ast.Load()), op=ast.BitXor(),
+                        right=ast.Name(id=pb, ctx=ast.Load())))
+
+    elt = ast.Call(
+        func=combine_lam,
+        args=[ast.Name(id=va, ctx=ast.Load()), ast.Name(id=vb, ctx=ast.Load())],
+        keywords=[])
+
+    zip_call = ast.Call(func=ast.Name(id="zip", ctx=ast.Load()),
+                         args=[mask_list, other_list], keywords=[])
+
+    return ast.ListComp(
+        elt=elt,
+        generators=[ast.comprehension(
+            target=ast.Tuple(
+                elts=[ast.Name(id=va, ctx=ast.Store()), ast.Name(id=vb, ctx=ast.Store())],
+                ctx=ast.Store()),
+            iter=zip_call, ifs=[], is_async=0)])
+
+
+def _make_decoder_def(dec_name: str, key: bytes) -> ast.stmt:
+    """
+    Builds, as real AST nodes, the per-module string decoder:
+
+        dec_name = lambda L: ''.join(chr(B ^ KEY[I % len(KEY)]) for I, B in enumerate(L))
+
+    KEY is embedded as a plain bytes literal, same as the stub-level
+    decoder (gnolly.strcodec._str_decoder_lambda)
+    """
+    rng = random.Random(secrets.randbits(64))
+    used: set = set()
+    p_in, p_i, p_b = (random_confusable_name(rng, used, 1) for _ in range(3))
+    kl = len(key)
+
+    xor_expr = ast.BinOp(
+        left=ast.Name(id=p_b, ctx=ast.Load()), op=ast.BitXor(),
+        right=ast.Subscript(
+            value=ast.Constant(value=key),
+            slice=ast.BinOp(left=ast.Name(id=p_i, ctx=ast.Load()), op=ast.Mod(),
+                             right=ast.Constant(value=kl)),
+            ctx=ast.Load()))
+    chr_call = ast.Call(func=ast.Name(id="chr", ctx=ast.Load()),
+                         args=[xor_expr], keywords=[])
+
+    genexp = ast.GeneratorExp(
+        elt=chr_call,
+        generators=[ast.comprehension(
+            target=ast.Tuple(
+                elts=[ast.Name(id=p_i, ctx=ast.Store()), ast.Name(id=p_b, ctx=ast.Store())],
+                ctx=ast.Store()),
+            iter=ast.Call(func=ast.Name(id="enumerate", ctx=ast.Load()),
+                          args=[ast.Name(id=p_in, ctx=ast.Load())], keywords=[]),
+            ifs=[], is_async=0)])
+
+    join_call = ast.Call(
+        func=ast.Attribute(value=ast.Constant(value=""), attr="join", ctx=ast.Load()),
+        args=[genexp], keywords=[])
+
+    lam = ast.Lambda(
+        args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=p_in)], vararg=None,
+                            kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+        body=join_call)
+
+    return ast.Assign(targets=[ast.Name(id=dec_name, ctx=ast.Store())], value=lam)
+
+
+def _enc_str(s: str, key: bytes, dec_getter) -> ast.expr:
+    """
+    Encode a string as a call to the per-module decoder function
+    (dec_getter()), applied to the AST for the split-lambda-comprehension
+    representation of its XOR'd ordinals.
+    """
+    target = [ord(c) ^ key[i % len(key)] for i, c in enumerate(s)]
+    list_expr = _split_int_list_ast(target)
+    return ast.Call(func=ast.Name(id=dec_getter(), ctx=ast.Load()),
+                     args=[list_expr], keywords=[])
 
 def _enc_int(n: int) -> ast.expr:
     k = secrets.randbelow(0xFFFF) + 1
@@ -157,39 +276,33 @@ def _enc_int(n: int) -> ast.expr:
         op=ast.BitXor(),
         right=ast.Constant(value=k))
 
-def _enc_float(f: float) -> ast.expr:
+def _enc_float(f: float, key: bytes, dec_getter) -> ast.expr:
     return ast.Call(
         func=ast.Attribute(
             value=ast.Name(id="float", ctx=ast.Load()),
             attr="fromhex", ctx=ast.Load()),
-        args=[_enc_str(f.hex())],
+        args=[_enc_str(f.hex(), key, dec_getter)],
         keywords=[])
 
-def _enc_bytes(b: bytes) -> ast.expr:
+def _enc_bytes(b: bytes, key: bytes, dec_getter) -> ast.expr:
+    """
+    Encode bytes the same way as _enc_str, then .encode('latin-1') the
+    decoded string back to bytes.
+    """
+    target = [v ^ key[i % len(key)] for i, v in enumerate(b)]
+    list_expr = _split_int_list_ast(target)
+    decode_call = ast.Call(func=ast.Name(id=dec_getter(), ctx=ast.Load()),
+                            args=[list_expr], keywords=[])
     return ast.Call(
-        func=ast.Attribute(
-            value=ast.Name(id="bytes", ctx=ast.Load()),
-            attr="fromhex", ctx=ast.Load()),
-        args=[ast.Constant(value=b.hex())], keywords=[])
+        func=ast.Attribute(value=decode_call, attr="encode", ctx=ast.Load()),
+        args=[ast.Constant(value="latin-1")], keywords=[])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pass 5 -> Import obfuscation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _hex_str_node(s: str) -> ast.expr:
-    """bytes.fromhex(hex).decode() -> hides the string literal."""
-    return ast.Call(
-        func=ast.Attribute(
-            value=ast.Call(
-                func=ast.Attribute(
-                    value=ast.Name(id="bytes", ctx=ast.Load()),
-                    attr="fromhex", ctx=ast.Load()),
-                args=[ast.Constant(value=s.encode().hex())], keywords=[]),
-            attr="decode", ctx=ast.Load()),
-        args=[], keywords=[])
-
-def _obf_import(node: ast.Import, pool: _NamePool) -> list[ast.stmt]:
+def _obf_import(node: ast.Import, pool: _NamePool, key: bytes, dec_getter) -> list[ast.stmt]:
     stmts = []
     for alias in node.names:
         mod  = alias.name
@@ -199,14 +312,14 @@ def _obf_import(node: ast.Import, pool: _NamePool) -> list[ast.stmt]:
             targets=[ast.Name(id=target, ctx=ast.Store())],
             value=ast.Call(
                 func=ast.Name(id="__import__", ctx=ast.Load()),
-                args=[_hex_str_node(mod)],
+                args=[_enc_str(mod, key, dec_getter)],
                 keywords=[],
             ),
             lineno=node.lineno, col_offset=node.col_offset,
         ))
     return stmts
 
-def _obf_import_from(node: ast.ImportFrom, pool: _NamePool) -> list[ast.stmt]:
+def _obf_import_from(node: ast.ImportFrom, pool: _NamePool, key: bytes, dec_getter) -> list[ast.stmt]:
     if node.level != 0:           # relative imports: leave alone
         return [node]
     if any(a.name == "*" for a in node.names):
@@ -220,7 +333,7 @@ def _obf_import_from(node: ast.ImportFrom, pool: _NamePool) -> list[ast.stmt]:
         targets=[ast.Name(id=tmp, ctx=ast.Store())],
         value=ast.Call(
             func=ast.Name(id="__import__", ctx=ast.Load()),
-            args=[_hex_str_node(mod)],
+            args=[_enc_str(mod, key, dec_getter)],
             keywords=[ast.keyword(arg="fromlist",
                                   value=ast.List(
                                       elts=[ast.Constant(value="")],
@@ -237,7 +350,7 @@ def _obf_import_from(node: ast.ImportFrom, pool: _NamePool) -> list[ast.stmt]:
             targets=[ast.Name(id=target, ctx=ast.Store())],
             value=ast.Call(
                 func=ast.Name(id="getattr", ctx=ast.Load()),
-                args=[ast.Name(id=tmp, ctx=ast.Load()), _hex_str_node(attr)],
+                args=[ast.Name(id=tmp, ctx=ast.Load()), _enc_str(attr, key, dec_getter)],
                 keywords=[],
             ),
             lineno=node.lineno, col_offset=node.col_offset,
@@ -250,13 +363,13 @@ def _obf_import_from(node: ast.ImportFrom, pool: _NamePool) -> list[ast.stmt]:
 # Pass 6 -> Control-flow flattening (state-machine dispatch)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random, bi_getter) -> list[ast.stmt]:
+def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random, bi_getter, enc_fn) -> list[ast.stmt]:
     """
     Flatten a function body into a while-True dispatch loop.
     Skip if body has fewer than 3 stmts or no branching:  not worth it.
     Also skip if body contains a bare Return in a non-tail position
     (those get handled naturally since we emit state transitions before them).
-    There is room for improvemnt here.
+    > There is room for improvemnt here.
 
     bi_getter: see _noise() -> routes the loop's True through the same
     getattr(builtins, "...") obfuscation as everywhere else.
@@ -326,7 +439,7 @@ def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random, bi_gette
     loop   = ast.While(
         test=ast.Call(
             func=ast.Name(id="getattr", ctx=ast.Load()),
-            args=[ast.Name(id=bi_getter(), ctx=ast.Load()), _enc_str("True")],
+            args=[ast.Name(id=bi_getter(), ctx=ast.Load()), enc_fn("True")],
             keywords=[]),
         body=[root_if],
         orelse=[])
@@ -338,13 +451,14 @@ def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random, bi_gette
 # Pass 7 -> Dead code helpers
 # ─────────────────────────────────────────────────────────────────────────────
 # > Room for improvemnt here
-def _dead(bi_getter) -> ast.stmt:
+def _dead(bi_getter, enc_fn) -> ast.stmt:
     """bi_getter: see _noise() -> routes True/False here through the same
-    getattr(builtins, "...") obfuscation as everywhere else."""
+    getattr(builtins, "...") obfuscation as everywhere else.
+    enc_fn: see _flatten() -> keyed string encoding for "True"/"False"."""
     def _t(name):
         return ast.Call(
             func=ast.Name(id="getattr", ctx=ast.Load()),
-            args=[ast.Name(id=bi_getter(), ctx=ast.Load()), _enc_str(name)],
+            args=[ast.Name(id=bi_getter(), ctx=ast.Load()), enc_fn(name)],
             keywords=[])
     c = secrets.randbelow(4)
     if c == 0:
@@ -370,7 +484,7 @@ def _dead(bi_getter) -> ast.stmt:
 # Pass 9 -> Polymorphic module-level noise
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _noise(pool: _NamePool, count: int, bi_getter) -> list[ast.stmt]:
+def _noise(pool: _NamePool, count: int, bi_getter, enc_fn) -> list[ast.stmt]:
     """
     bi_getter: zero-arg callable returning the name of the (lazily
     created) local builtins handle -> lets the True/False used here go
@@ -378,6 +492,7 @@ def _noise(pool: _NamePool, count: int, bi_getter) -> list[ast.stmt]:
     True/False/None in the protected source, instead of leaking as bare
     keyword constants just because this is scaffolding rather than
     user code.
+    enc_fn: see _flatten() -> keyed string encoding for "True"/"False".
     """
     stmts: list[ast.stmt] = []
     for _ in range(count):
@@ -398,13 +513,13 @@ def _noise(pool: _NamePool, count: int, bi_getter) -> list[ast.stmt]:
         elif c == 1:
             true_expr = ast.Call(
                 func=ast.Name(id="getattr", ctx=ast.Load()),
-                args=[ast.Name(id=bi_getter(), ctx=ast.Load()), _enc_str("True")],
+                args=[ast.Name(id=bi_getter(), ctx=ast.Load()), enc_fn("True")],
                 keywords=[])
             stmts.append(ast.Assert(test=true_expr, msg=None))
         else:
             false_expr = ast.Call(
                 func=ast.Name(id="getattr", ctx=ast.Load()),
-                args=[ast.Name(id=bi_getter(), ctx=ast.Load()), _enc_str("False")],
+                args=[ast.Name(id=bi_getter(), ctx=ast.Load()), enc_fn("False")],
                 keywords=[])
             stmts.append(ast.If(test=false_expr,
                                 body=[ast.Pass()], orelse=[]))
@@ -416,11 +531,11 @@ def _noise(pool: _NamePool, count: int, bi_getter) -> list[ast.stmt]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _Transformer(ast.NodeTransformer):
-    def __init__(self, pool: _NamePool, seed: int,
+    def __init__(self, pool: _NamePool,
                  obf_strings, obf_constants, obf_imports,
                  inject_dead, flatten_flow):
         self._pool         = pool
-        self._rng          = random.Random(seed)
+        self._rng          = random.SystemRandom()
         self._obf_str      = obf_strings
         self._obf_const    = obf_constants
         self._obf_imp      = obf_imports
@@ -430,6 +545,8 @@ class _Transformer(ast.NodeTransformer):
         self._pattern_depth = 0  # track whether we're inside a match-case pattern
         self._class_depth  = 0   # track whether we're inside a class
         self._bi_var       = None  # lazily-created builtins module handle used to obfuscate None/True/False (see _singleton() and visit_Module)
+        self._str_key      = secrets.token_bytes(16)  # per-module XOR key for string/bytes encoding
+        self._dec_var      = None  # lazily-created per-module string decoder function (see _dec()/_enc() and visit_Module)
 
     def _bi(self) -> str:
         """Name of the (lazily created) local builtins module handle."""
@@ -437,11 +554,22 @@ class _Transformer(ast.NodeTransformer):
             self._bi_var = self._pool.fresh()
         return self._bi_var
 
+    def _dec(self) -> str:
+        """Name of the (lazily created) per-module string decoder function."""
+        if self._dec_var is None:
+            self._dec_var = self._pool.fresh()
+        return self._dec_var
+
+    def _enc(self, s: str) -> ast.expr:
+        """Encode a string the same keyed way as _enc_str, bound to this
+        transformer's own key/decoder."""
+        return _enc_str(s, self._str_key, self._dec)
+
     def _singleton(self, name: str, node: ast.AST) -> ast.expr:
         return ast.copy_location(
             ast.Call(
                 func=ast.Name(id="getattr", ctx=ast.Load()),
-                args=[ast.Name(id=self._bi(), ctx=ast.Load()), _enc_str(name)],
+                args=[ast.Name(id=self._bi(), ctx=ast.Load()), self._enc(name)],
                 keywords=[]),
             node)
 
@@ -459,7 +587,7 @@ class _Transformer(ast.NodeTransformer):
         for stmt in body:
             out.append(stmt)
             if self._rng.random() < 0.35:
-                out.append(_dead(self._bi))
+                out.append(_dead(self._bi, self._enc))
         return out
 
     # Module
@@ -467,14 +595,16 @@ class _Transformer(ast.NodeTransformer):
         node.body = self._strip_doc(node.body)
         self.generic_visit(node)
         cnt = self._rng.randint(2, 5)
-        noise_stmts = _noise(self._pool, cnt, self._bi)
+        noise_stmts = _noise(self._pool, cnt, self._bi, self._enc)
         preamble = []
+        if self._dec_var is not None:
+            preamble.append(_make_decoder_def(self._dec_var, self._str_key))
         if self._bi_var is not None:
             preamble.append(ast.Assign(
                 targets=[ast.Name(id=self._bi_var, ctx=ast.Store())],
                 value=ast.Call(
                     func=ast.Name(id="__import__", ctx=ast.Load()),
-                    args=[_enc_str("builtins")], keywords=[])))
+                    args=[self._enc("builtins")], keywords=[])))
         node.body = preamble + noise_stmts + node.body
         return node
 
@@ -495,7 +625,7 @@ class _Transformer(ast.NodeTransformer):
         node.body = self._strip_doc(node.body)
         self.generic_visit(node)
         if self._flatten:
-            node.body = _flatten(node.body, self._pool, self._rng, self._bi)
+            node.body = _flatten(node.body, self._pool, self._rng, self._bi, self._enc)
         node.body = self._scatter_dead(node.body)
         return node
 
@@ -538,12 +668,12 @@ class _Transformer(ast.NodeTransformer):
     def visit_Import(self, node):
         if not self._obf_imp:
             return node
-        return _obf_import(node, self._pool)
+        return _obf_import(node, self._pool, self._str_key, self._dec)
 
     def visit_ImportFrom(self, node):
         if not self._obf_imp:
             return node
-        return _obf_import_from(node, self._pool)
+        return _obf_import_from(node, self._pool, self._str_key, self._dec)
 
     # f-strings -> don't touch embedded constants
     def visit_JoinedStr(self, node):
@@ -568,7 +698,7 @@ class _Transformer(ast.NodeTransformer):
                 case.guard = self.visit(case.guard)
             case.body = [self.visit(stmt) for stmt in case.body]
             if self._flatten:
-                case.body = _flatten(case.body, self._pool, self._rng, self._bi)
+                case.body = _flatten(case.body, self._pool, self._rng, self._bi, self._enc)
             case.body = self._scatter_dead(case.body)
         return node
 
@@ -578,7 +708,7 @@ class _Transformer(ast.NodeTransformer):
             return node
         v = node.value
         if isinstance(v, str) and self._obf_str and v:
-            try:    return ast.copy_location(_enc_str(v), node)
+            try:    return ast.copy_location(self._enc(v), node)
             except: return node
         if isinstance(v, bool):
             if self._obf_const:
@@ -591,9 +721,9 @@ class _Transformer(ast.NodeTransformer):
         if isinstance(v, int) and self._obf_const and abs(v) <= 0xFFFFFF:
             return ast.copy_location(_enc_int(v), node)
         if isinstance(v, float) and self._obf_const and abs(v) < 1e12:
-            return ast.copy_location(_enc_float(v), node)
+            return ast.copy_location(_enc_float(v, self._str_key, self._dec), node)
         if isinstance(v, bytes) and self._obf_const and v:
-            return ast.copy_location(_enc_bytes(v), node)
+            return ast.copy_location(_enc_bytes(v, self._str_key, self._dec), node)
         return node
 
 
@@ -603,7 +733,6 @@ class _Transformer(ast.NodeTransformer):
 
 def obfuscate_source(
     source: str,
-    seed: int = 0,
     obf_strings:   bool = True,
     obf_constants: bool = True,
     obf_imports:   bool = True,
@@ -616,10 +745,10 @@ def obfuscate_source(
     """
     tree = ast.parse(source)
 
-    pool = _NamePool(seed=seed)
+    pool = _NamePool()
     _Collector(pool).visit(tree)
 
-    xfm = _Transformer(pool, seed,
+    xfm = _Transformer(pool,
                         obf_strings, obf_constants, obf_imports,
                         inject_dead, flatten_flow)
     new_tree = xfm.visit(tree)
