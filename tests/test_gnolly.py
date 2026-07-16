@@ -17,38 +17,38 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 class TestEncoding:
     def test_roundtrip_empty(self):
         from gnolly.encoding import GnollyCodec
-        c = GnollyCodec(seed=b"test")
+        c = GnollyCodec(key_material=b"test")
         assert c.decode(c.encode(b"")) == b""
 
     def test_roundtrip_single_byte(self):
         from gnolly.encoding import GnollyCodec
-        c = GnollyCodec(seed=b"test")
+        c = GnollyCodec(key_material=b"test")
         for b in range(256):
             data = bytes([b])
             assert c.decode(c.encode(data)) == data
 
     def test_roundtrip_all_lengths(self):
         from gnolly.encoding import GnollyCodec
-        c = GnollyCodec(seed=b"gnolly-seed")
+        c = GnollyCodec(key_material=b"gnolly-seed")
         for length in range(0, 200):
             data = os.urandom(length)
             assert c.decode(c.encode(data)) == data, f"Failed at length {length}"
 
-    def test_different_seeds_different_output(self):
+    def test_different_key_material_different_output(self):
         from gnolly.encoding import GnollyCodec
         data = b"hello gnolly"
-        c1 = GnollyCodec(seed=b"seed1")
-        c2 = GnollyCodec(seed=b"seed2")
+        c1 = GnollyCodec(key_material=b"material-a")
+        c2 = GnollyCodec(key_material=b"material-b")
         assert c1.encode(data) != c2.encode(data)
 
     def test_no_equals_in_alphabet(self):
         from gnolly.encoding import GnollyCodec
-        c = GnollyCodec(seed=b"test")
+        c = GnollyCodec(key_material=b"test")
         assert "=" not in c._alpha, "= must not be in alphabet (reserved as padding)"
 
     def test_large_binary_roundtrip(self):
         from gnolly.encoding import GnollyCodec
-        c = GnollyCodec(seed=b"bigtest")
+        c = GnollyCodec(key_material=b"bigtest")
         data = os.urandom(10_000)
         assert c.decode(c.encode(data)) == data
 
@@ -121,7 +121,7 @@ class TestObfuscation:
         """Obfuscate source, exec it, capture stdout."""
         import io, contextlib
         from gnolly.obfuscate import obfuscate_source
-        obf = obfuscate_source(source, seed=12345)
+        obf = obfuscate_source(source)
         buf = io.StringIO()
         g = {"__builtins__": __builtins__}
         with contextlib.redirect_stdout(buf):
@@ -131,19 +131,19 @@ class TestObfuscation:
     def test_string_obfuscated(self):
         from gnolly.obfuscate import obfuscate_source
         src = 'x = "hello world"'
-        obf = obfuscate_source(src, seed=1)
+        obf = obfuscate_source(src)
         assert "hello world" not in obf
 
     def test_integers_obfuscated(self):
         from gnolly.obfuscate import obfuscate_source
         src = "x = 12345"
-        obf = obfuscate_source(src, seed=1)
+        obf = obfuscate_source(src)
         assert "12345" not in obf
 
     def test_docstrings_removed(self):
         from gnolly.obfuscate import obfuscate_source
         src = '"""This is a docstring."""\ndef foo():\n    """Also a docstring."""\n    pass'
-        obf = obfuscate_source(src, seed=1)
+        obf = obfuscate_source(src)
         assert "This is a docstring" not in obf
         assert "Also a docstring" not in obf
 
@@ -189,18 +189,18 @@ print(greet(name="Gnolly", greeting="Hi"))
         import ast as ast_mod
         from gnolly.obfuscate import obfuscate_source
         src = open(os.path.join(os.path.dirname(__file__), "..", "examples", "sample.py")).read()
-        obf = obfuscate_source(src, seed=999)
+        obf = obfuscate_source(src)
         ast_mod.parse(obf)  # should not raise
 
 
 # ── Full Pipeline ─────────────────────────────────────────────────────────────
 
 class TestPipeline:
-    def _protect_and_run(self, source: str, seed: int = 42) -> dict:
+    def _protect_and_run(self, source: str) -> dict:
         from gnolly.pipeline import protect
         from gnolly.keymanager import generate_key, key_to_hex
         key = generate_key()
-        stub = protect(source, key, seed=seed)
+        stub = protect(source, key)
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         g = {"__builtins__": __builtins__}
         exec(compile(stub, "protected.gnolly.py", "exec"), g)
@@ -215,7 +215,7 @@ class TestPipeline:
         from gnolly.keymanager import generate_key, key_to_hex
         src = "print('gnolly works')"
         key = generate_key()
-        stub = protect(src, key, seed=7)
+        stub = protect(src, key)
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -227,7 +227,7 @@ class TestPipeline:
         from gnolly.keymanager import generate_key, key_to_hex
         src = "print('hello')"
         key = generate_key()
-        stub = protect(src, key, seed=1)
+        stub = protect(src, key)
         wrong_key = generate_key()
         os.environ["GNOLLY_KEY"] = key_to_hex(wrong_key)
         with pytest.raises(SystemExit):
@@ -239,7 +239,7 @@ class TestPipeline:
         from gnolly.keymanager import generate_key, key_to_hex
         src = open(os.path.join(os.path.dirname(__file__), "..", "examples", "sample.py")).read()
         key = generate_key()
-        stub = protect(src, key, seed=42)
+        stub = protect(src, key)
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -249,13 +249,14 @@ class TestPipeline:
         assert "fibonacci(10) = 55" in out
         assert "Hello, World! The answer is 42." in out
 
-    def test_different_seeds_different_stubs(self):
+    def test_repeated_calls_produce_different_stubs(self):
+        """No seed exists anymore -- every protect() call must still be unique."""
         from gnolly.pipeline import protect
         from gnolly.keymanager import generate_key
         src = "x = 1"
         key = generate_key()
-        s1 = protect(src, key, seed=1)
-        s2 = protect(src, key, seed=2)
+        s1 = protect(src, key)
+        s2 = protect(src, key)
         assert s1 != s2
 
     def test_no_source_in_stub(self):
@@ -263,7 +264,7 @@ class TestPipeline:
         from gnolly.keymanager import generate_key
         src = 'SECRET_TOKEN = "xK9mP2qR7vL4nW1j"'
         key = generate_key()
-        stub = protect(src, key, seed=5)
+        stub = protect(src, key)
         assert "SECRET_TOKEN" not in stub
         assert "xK9mP2qR7vL4nW1j" not in stub
 
@@ -273,7 +274,7 @@ class TestPipeline:
         from gnolly.keymanager import generate_key
         src = "x = 1"
         key = generate_key()
-        stub = protect(src, key, seed=3)
+        stub = protect(src, key)
         # exec() should only appear followed by a variable name (code object),
         # never by a string literal or decode() call
         import re
@@ -330,7 +331,7 @@ class TestPipelineWithShuffle:
         from gnolly.keymanager import generate_key, key_to_hex
         src = open(os.path.join(os.path.dirname(__file__), "..", "examples", "sample.py")).read()
         key = generate_key()
-        stub = protect(src, key, seed=7)
+        stub = protect(src, key)
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -345,7 +346,7 @@ class TestPipelineWithShuffle:
         from gnolly.keymanager import generate_key, key_to_hex
         src = "print('no shuffle')"
         key = generate_key()
-        stub = protect(src, key, seed=3)
+        stub = protect(src, key)
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -422,11 +423,11 @@ class TestPackageProtection:
 # ── Anti-Debug ────────────────────────────────────────────────────────────────
 
 class TestAntiDebug:
-    def _make_stub(self, src="print('x')", seed=99):
+    def _make_stub(self, src="print('x')"):
         from gnolly.pipeline import protect
         from gnolly.keymanager import generate_key, key_to_hex
         key = generate_key()
-        stub = protect(src, key, seed=seed)
+        stub = protect(src, key)
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         return stub
 
@@ -443,7 +444,7 @@ class TestAntiDebug:
 
     def test_profile_hook_triggers_exit(self):
         """sys.setprofile active (profiler attached) -> SystemExit."""
-        stub = self._make_stub(seed=100)
+        stub = self._make_stub()
         import sys as _sys
         _sys.setprofile(lambda *a: None)
         try:
@@ -456,7 +457,7 @@ class TestAntiDebug:
         """pydevd in sys.modules (PyCharm debugger) -> SystemExit."""
         import types, sys as _sys
         _sys.modules['pydevd'] = types.ModuleType('pydevd')
-        stub = self._make_stub(seed=101)
+        stub = self._make_stub()
         try:
             with pytest.raises(SystemExit):
                 exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
@@ -467,7 +468,7 @@ class TestAntiDebug:
         """debugpy in sys.modules (VS Code debugger) -> SystemExit."""
         import types, sys as _sys
         _sys.modules['debugpy'] = types.ModuleType('debugpy')
-        stub = self._make_stub(seed=102)
+        stub = self._make_stub()
         try:
             with pytest.raises(SystemExit):
                 exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
@@ -478,7 +479,7 @@ class TestAntiDebug:
         """No debugger active → runs normally."""
         import io, contextlib
         src = "print('antidebug ok')"
-        stub = self._make_stub(src, seed=103)
+        stub = self._make_stub(src)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
@@ -486,7 +487,7 @@ class TestAntiDebug:
 
     def test_antidebug_lines_in_stub(self):
         """Anti-debug checks are present as obfuscated lines in the stub."""
-        stub = self._make_stub(seed=104)
+        stub = self._make_stub()
         # The stub should contain settrace and gettrace references (encoded)
         # We can't check by name since they're encoded, but we can verify
         # the stub has significantly more lines than a stub without antidebug
@@ -494,7 +495,7 @@ class TestAntiDebug:
 
     def test_no_plain_debug_strings(self):
         """Debug module names don't appear in plaintext in the stub."""
-        stub = self._make_stub(seed=105)
+        stub = self._make_stub()
         for name in ['pydevd', 'debugpy', 'gettrace', 'settrace', 'getprofile']:
             assert name not in stub, f"'{name}' visible in stub"
 
@@ -517,7 +518,7 @@ class TestMachineBinding:
         from gnolly.pipeline import protect
         from gnolly.keymanager import generate_key, key_to_hex
         key = generate_key()
-        stub = protect("print('unbound')", key, seed=1)
+        stub = protect("print('unbound')", key)
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -534,7 +535,7 @@ class TestMachineBinding:
         if fp is None:
             pytest.skip("No stable fingerprint on this platform")
         key = generate_key()
-        stub = protect("print('bound ok')", key, seed=2, machine_fingerprint=fp)
+        stub = protect("print('bound ok')", key, machine_fingerprint=fp)
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -551,7 +552,7 @@ class TestMachineBinding:
             pytest.skip("No stable fingerprint on this platform")
         wrong_fp = bytes(b ^ 0xFF for b in fp)
         key = generate_key()
-        stub = protect("print('should not run')", key, seed=3,
+        stub = protect("print('should not run')", key,
                        machine_fingerprint=wrong_fp)
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         with pytest.raises(SystemExit):
@@ -561,7 +562,7 @@ class TestMachineBinding:
         """No Gnolly-specific identifiers visible in stub output."""
         from gnolly.pipeline import protect
         from gnolly.keymanager import generate_key
-        stub = protect("x = 1", generate_key(), seed=99)
+        stub = protect("x = 1", generate_key())
         for ident in ['gnolly', '_gnolly_core', 'gnolly_run']:
             assert ident not in stub, f"'{ident}' found in stub"
 
@@ -582,7 +583,7 @@ class TestImportHook:
         """Import hook hides all Gnolly identifiers from stub."""
         from gnolly.pipeline import protect
         from gnolly.keymanager import generate_key
-        stub = protect("x=1", generate_key(), seed=10)
+        stub = protect("x=1", generate_key())
         for ident in ['gnolly', '_gnolly_core', 'gnolly_run', 'spec_from_file']:
             assert ident not in stub, f"'{ident}' found in stub"
 
@@ -595,7 +596,7 @@ class TestImportHook:
         so_hash = get_core_so_hash()
         if so_hash is None:
             pytest.skip("No compiled .so")
-        stub = protect("x=1", generate_key(), seed=11)
+        stub = protect("x=1", generate_key())
         assert so_hash not in stub, \
             ".so hash must not appear as a plaintext literal in the stub"
 
@@ -606,7 +607,7 @@ class TestImportHook:
         from gnolly.keymanager import generate_key, key_to_hex
         src = open(os.path.join(os.path.dirname(__file__), "..", "examples", "sample.py")).read()
         key = generate_key()
-        stub = protect(src, key, seed=12)
+        stub = protect(src, key)
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
