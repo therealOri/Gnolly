@@ -21,7 +21,7 @@ __ __
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://python.org)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-success)](#platform-support)
-[![Version](https://img.shields.io/badge/Version-2.0-blueviolet)](#changelog)
+[![Version](https://img.shields.io/badge/Version-1.0-blueviolet)](#changelog)
 
 </div>
 
@@ -86,24 +86,21 @@ __ __
 pip install pycryptodome cython
 git clone https://github.com/therealOri/Gnolly
 cd Gnolly
-python setup.py build_ext --inplace   # builds _gnolly_core.so and _gnolly_vm.so
-pip install .
+./make.sh
 ```
 > Assuming you are in a 3.12 pyenv virtualenv.
+> If `./make.sh` doesn't run, running `chmod+x make.sh` then trying again should work.
 
-Or as a one-liner:
+The provided build/make script, builds the needed .so files and then pip installs gnolly as a package into your site-packages dir, and then cleans up the local `build/`, egg-info, and in-place `.c`/`.so` artifacts (they're already copied into site-packages by `pip install .` at that point):
 
-```bash
-pip install pycryptodome cython && python setup.py build_ext --inplace && pip install .
-```
+<br>
 
 ### Protect a file
 
 ```bash
 gnolly protect your_script.py
 ```
-
-Gnolly prints the hex key and saves it to `your_script.gnly.key`. **Back this up, without it, the protected file cannot run.**
+> Gnolly prints the hex key and saves it to `your_script.gnly.key`. **Back this up, without it, the protected file cannot run.**
 
 ```bash
 # Specify an output path explicitly
@@ -112,6 +109,8 @@ gnolly protect your_script.py your_output_file.gnly.py
 # Use an existing keyfile
 gnolly protect your_script.py -K my.key
 ```
+
+<br>
 
 ### Run the protected file
 
@@ -144,21 +143,12 @@ The suffix encodes the Python version and platform, e.g. `.cpython-312-x86_64-li
 
 <br>
 
-### Building the .so files
-
-```bash
-python setup.py build_ext --inplace
-```
-> This creates both `.so` files inside `gnolly/` locally and installs them in your site-packages library.
-
-<br>
-
 ### Where to place the .so files when distributing
 > Gnolly searches for each `.so` in four locations, tried in order:
 
 | Priority | Location | Typical use |
 |---|---|---|
-| 1 | Same directory as the `.gnolly.py` file | Simplest, just drop both files together |
+| 1 | Same directory as the `.gnly.py` file | Simplest, just drop both files together |
 | 2 | `./gnolly/` relative to current working directory | Running from a project root with gnolly installed locally |
 | 3 | The `gnolly` package directory (via `sys.modules`) | gnolly installed in the Python environment |
 | 4 | `sys.path` scan for any `gnolly/` subdirectory | Non-standard layouts, virtualenvs |
@@ -175,8 +165,8 @@ your_app/
 **Alternativey -> gnolly installed in the environment:**
 
 ```bash
-pip install gnolly          # installs with pre-built .so files
-python my_script.gnolly.py  # finds both .so files via sys.modules
+./make.sh          # pip installs with pre-built .so files
+python my_script.gnly.py  # finds both .so files via sys.modules
 ```
 
 <br>
@@ -223,7 +213,6 @@ gnolly protect <input.py> [output.py] [options]
   --no-numbers            Skip integer XOR obfuscation
   --bind                  Bind output to THIS machine (uses current fingerprint)
   --bind-fp HEX           Bind to a specific machine fingerprint (from 'gnolly fingerprint')
-  --seed INT              Fix RNG seed for reproducible output
   -v, --verbose           Show pipeline progress
   --verbose-errors        Emit error messages from the stub on failure (dev only)
 ```
@@ -301,34 +290,12 @@ protect(
     inject_dead: bool = True,
     obf_numbers: bool = True,
     machine_fingerprint: bytes | None = None,
-    seed: int | None = None,
     verbose: bool = False,
     silent: bool = True,
 ) -> str
 ```
 
----
-
-<br>
-
-## Verifying protection is active
-
-```bash
-python -m gnolly.verify
-```
-
-This runs 11 checks and confirms:
-
-- Both `.so` files are compiled native code
-- The GIR translation/serialization round-trips correctly
-- GIR opcode shuffles are unique per key (same source -> different blobs)
-- No `marshal` calls in the VM pipeline (custom binary only)
-- `sys.settrace` fires **zero events** for protected code -> CPython's eval loop never touches it
-- `dis` and `marshal` cannot decode the GIR blob (it is not CPython bytecode)
-- End-to-end protection of a non-trivial module works correctly
-- Generators execute correctly inside the GIR VM
-
-Expected output ends with: `Result: PASS -> VM protection is ACTIVE`
+> Every call to `protect()` (and every underlying obfuscation/encoding step) is fully non-deterministic by design -- there is no seed, fixed or otherwise, anywhere in the pipeline, internal or CLI-exposed. Two calls with identical `source`/`password` always produce different output.
 
 ---
 
@@ -431,42 +398,5 @@ __ __
 ```bash
 pip install pytest
 python -m pytest tests/ -v
-```
-__ __
-
-<br>
-
-## Project structure
-
-```
-Gnolly_Main/
-├── gnolly/
-│   ├── __init__.py           — public API (protect, protect_file)
-│   ├── __main__.py           — python -m gnolly entry point
-│   ├── cli.py                — command-line interface
-│   ├── pipeline.py           — orchestrates all protection stages
-│   ├── obfuscate.py          — AST transformer (name mangling, dead code, etc.)
-│   ├── vm_translate.py       — CPython bytecode -> GIR translation
-│   ├── vm_isa.py             — GIR instruction set definition and opcode shuffle
-│   ├── vm_serialize.py       — GIR serialization/deserialization
-│   ├── vm_pipeline.py        — GIR opcode shuffle + blob production
-│   ├── compress.py           — zlib/lzma/bz2 with auto-select
-│   ├── crypto.py             — AES-256-GCM + PBKDF2
-│   ├── encoding.py           — custom seeded-alphabet codec
-│   ├── stub.py               — generates the obfuscated loader script
-│   ├── import_hook.py        — generates .so search and load code
-|   ├── integrity.py          — folds file hashes into a key to uphold integrity
-│   ├── binding.py            — machine fingerprinting for --bind
-│   ├── keymanager.py         — key generation, save, load
-│   ├── verify.py             — python -m gnolly.verify self-test
-│   ├── _gnolly_core.pyx      — Cython: AES-256-GCM decrypt, PBKDF2, anti-debug
-│   ├── _gnolly_vm.pyx        — Cython: GIR interpreter (full stack machine)
-│   └── _gnolly_{core,vm}.*.so — compiled C extensions (build with setup.py)
-├── examples/
-│   └── sample.py
-├── tests/
-│   └── test_gnolly.py
-├── setup.py                  — builds both .so files (use this)
-└── README.md
 ```
 __ __
