@@ -78,7 +78,6 @@ def cmd_protect(args):
         inject_dead         = not args.no_dead,
         obf_numbers         = not args.no_numbers,
         machine_fingerprint = _machine_fp,
-        seed                = args.seed,
         verbose             = args.verbose,
         silent              = not args.verbose_errors,
     )
@@ -123,7 +122,6 @@ def cmd_protect_package(args):
         inject_dead         = not args.no_dead,
         obf_numbers         = not args.no_numbers,
         machine_fingerprint = _machine_fp,
-        seed                = args.seed,
     )
     print(f"\n[gnolly] Runtime:")
     print(f"           export GNOLLY_KEY={key_to_hex(key)}")
@@ -143,7 +141,6 @@ def _add_obf_flags(p):
                    help="Bind output to THIS machine (uses current machine fingerprint)")
     p.add_argument("--bind-fp",    default=None, dest="bind_fp",
                    help="Bind to a specific machine fingerprint hex (from 'gnolly fingerprint')")
-    p.add_argument("--seed", type=int, default=None,    help="Fix RNG seed (reproducible output)")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--verbose-errors", action="store_true", dest="verbose_errors",
                    help="Emit error messages from protected stub on failure (development only; default is silent)")
