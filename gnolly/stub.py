@@ -26,6 +26,7 @@ from .antidebug import generate_antidebug_lines, generate_timing_check_lines
 from .binding_stub import generate_binding_lines
 from .import_hook  import generate_import_hook_lines, get_core_so_hash, get_vm_so_hash
 from .namegen import random_confusable_name
+from .flatten import flatten_source
 from .strcodec import (
     _obf_int_lambda, _split_int_list_expr,
     _enc_str, _enc_bytes_as_str,
@@ -114,6 +115,7 @@ def generate_stub(
     shuffle_opcodes: bool = True,   # kept for API compat; ignored when use_vm=True
     bound: bool = False,
     silent: bool = True,
+    flatten: bool = True,
 ) -> str:
     rng = random.SystemRandom()
     N   = _gen_names(150)
@@ -447,4 +449,7 @@ def generate_stub(
         if stripped.startswith('#'):
             continue   # drop comment lines entirely
         final.append(_line)
-    return "\n".join(final)
+    result = "\n".join(final)
+    if flatten:
+        result = flatten_source(result)
+    return result
