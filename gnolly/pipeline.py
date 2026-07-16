@@ -10,7 +10,7 @@ Orchestrates the full Gnolly protection pipeline:
     ├─ [3] VM opcode shuffle    per-file GIR opcode permutation
     ├─ [4] Compress             zlib/lzma/bz2, best wins
     ├─ [5] Encrypt              AES-256-GCM + PBKDF2-HMAC-SHA256 (600k iters)
-    ├─ [6] Custom encode        per-file seeded alphabet, unique every run
+    ├─ [6] Custom encode        per-file alphabet keyed from password + random salt, unique every run
     └─ [7] Stub generation      obfuscated I/l/O/0 loader
               │
               └─ protected_output.gnly.py
@@ -65,7 +65,6 @@ def protect(
     obf_numbers: bool = True,
     inject_junk: bool = True,
     machine_fingerprint: bytes | None = None,
-    seed: int | None = None,
     verbose: bool = False,
     silent: bool = True,
 ) -> str:
@@ -81,22 +80,18 @@ def protect(
     obf_numbers     : toggle integer XOR obfuscation
     inject_junk     : toggle GIR-level junk instruction injection (after compilation,
                       alongside the translated bytecode -> see vm_translate.py)
-    seed            : fixed RNG seed for reproducible output (None = random)
     verbose         : print stage progress to stderr
     machine_fingerprint : 32-byte fingerprint from binding.collect_fingerprint().
                       When set, the file will only decrypt on the bound machine.
     silent          : suppress ALL error output from the protected stub (default: True).
     """
-    if seed is None:
-        seed = secrets.randbits(32)
-
     def _log(msg: str) -> None:
         if verbose:
             print(f"  [gnolly] {msg}", file=sys.stderr)
 
     # Stage 1: AST obfuscation
     _log("Stage 1/5  AST obfuscation …")
-    obf_source = obfuscate_source(source, seed=seed) \
+    obf_source = obfuscate_source(source) \
         if (mangle_names or obf_strings or inject_dead or obf_numbers) \
         else source
 
@@ -161,7 +156,7 @@ def protect(
 
     # Stage 6: Custom encode + stub generation
     _log("Stub generation …")
-    codec = GnollyCodec(seed=password + seed.to_bytes(4, "big"))
+    codec = GnollyCodec(key_material=password + secrets.token_bytes(16))
     encoded_payload = codec.encode(encrypted_blob)
 
     stub_source = generate_stub(
@@ -175,7 +170,6 @@ def protect(
         blob_header_skip= _HEADER_LEN,
         use_vm          = True,
         bound           = (machine_fingerprint is not None),
-        seed            = seed,
         silent          = silent,
     )
     return stub_source
