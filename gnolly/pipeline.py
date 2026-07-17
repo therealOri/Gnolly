@@ -69,7 +69,7 @@ def protect(
     verbose: bool = False,
     silent: bool = True,
     flatten: bool = True,
-    minify: bool = False,
+    minify: bool = True,
 ) -> str:
     """
     Parameters
@@ -90,8 +90,9 @@ def protect(
     flatten         : toggle control-flow flattening of the generated stub
                       (opaque dispatch-loop state machine -> see gnolly.flatten).
     minify          : toggle post-generation minification of the stub
-                      (see gnolly.minify). Off by default since it's an
-                      extra, separate pass; enable via --minify on the CLI.
+                      (see gnolly.minify). On by default; disable via
+                      --no-minify on the CLI if you want to inspect the
+                      unminified output.
     """
     def _log(msg: str) -> None:
         if verbose:
