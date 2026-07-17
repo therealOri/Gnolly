@@ -81,7 +81,7 @@ def cmd_protect(args):
         verbose             = args.verbose,
         silent              = not args.verbose_errors,
         flatten             = not args.no_flatten,
-        minify              = args.minify,
+        minify              = not args.no_minify,
     )
     print(f"\n[gnolly] Done -> {out}")
     print(f"[gnolly] Runtime:")
@@ -125,7 +125,7 @@ def cmd_protect_package(args):
         obf_numbers         = not args.no_numbers,
         machine_fingerprint = _machine_fp,
         flatten             = not args.no_flatten,
-        minify              = args.minify,
+        minify              = not args.no_minify,
     )
     print(f"\n[gnolly] Runtime:")
     print(f"           export GNOLLY_KEY={key_to_hex(key)}")
@@ -143,8 +143,8 @@ def _add_obf_flags(p):
     p.add_argument("--no-numbers", action="store_true", help="Disable integer obfuscation")
     p.add_argument("--no-flatten", action="store_true",
                    help="Disable control-flow flattening of the generated stub")
-    p.add_argument("-m", "--minify", action="store_true",
-                   help="Minify the protected output as much as possible (smaller, still fully obfuscated)")
+    p.add_argument("--no-minify", action="store_true",
+                   help="Disable minification of the protected output (on by default)")
     p.add_argument("--bind",       action="store_true",
                    help="Bind output to THIS machine (uses current machine fingerprint)")
     p.add_argument("--bind-fp",    default=None, dest="bind_fp",
