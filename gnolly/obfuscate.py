@@ -136,6 +136,44 @@ class _Collector(ast.NodeVisitor):
 # Passes 3 & 4 -> Constant encryption helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _bool_int_ast(n: int, rng: random.Random | None = None) -> ast.expr:
+    """
+    AST equivalent of gnolly.strcodec._bool_int_expr: builds an
+    expression tree that sums one shifted True/False term per bit of
+    "n", plus a couple of shuffled-in zero-value filler terms, so
+    the constant reads as boolean arithmetic rather than a bare digit.
+    """
+    if rng is None:
+        rng = random.Random(secrets.randbits(64))
+    if n == 0:
+        return ast.BoolOp(op=ast.And(), values=[ast.Constant(value=True), ast.Constant(value=False)])
+    neg = n < 0
+    m = -n if neg else n
+    bits = m.bit_length()
+    terms: list[ast.expr] = []
+    for i in range(bits):
+        bit = (m >> i) & 1
+        b = ast.Constant(value=bool(bit))
+        if i == 0:
+            terms.append(b)
+        else:
+            style = rng.randrange(2)
+            if style == 0:
+                terms.append(ast.BinOp(left=b, op=ast.LShift(), right=ast.Constant(value=i)))
+            else:
+                terms.append(ast.BinOp(left=b, op=ast.Mult(), right=ast.Constant(value=1 << i)))
+    for _ in range(rng.randint(0, 2)):
+        zero = ast.BinOp(left=ast.Constant(value=True), op=ast.Sub(), right=ast.Constant(value=True))
+        terms.insert(rng.randrange(len(terms) + 1), zero)
+    rng.shuffle(terms)
+    expr = terms[0]
+    for t in terms[1:]:
+        expr = ast.BinOp(left=expr, op=ast.Add(), right=t)
+    if neg:
+        expr = ast.UnaryOp(op=ast.USub(), operand=expr)
+    return expr
+
+
 def _obf_int_lambda_ast(n: int) -> ast.expr:
     """
     AST equivalent of gnolly.strcodec._obf_int_lambda: represents a
@@ -271,10 +309,11 @@ def _enc_str(s: str, key: bytes, dec_getter) -> ast.expr:
 
 def _enc_int(n: int) -> ast.expr:
     k = secrets.randbelow(0xFFFF) + 1
+    rng = random.Random(secrets.randbits(64))
     return ast.BinOp(
-        left=ast.Constant(value=n ^ k),
+        left=_bool_int_ast(n ^ k, rng),
         op=ast.BitXor(),
-        right=ast.Constant(value=k))
+        right=_bool_int_ast(k, rng))
 
 def _enc_float(f: float, key: bytes, dec_getter) -> ast.expr:
     return ast.Call(
