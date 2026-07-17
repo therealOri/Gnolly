@@ -451,5 +451,5 @@ def generate_stub(
         final.append(_line)
     result = "\n".join(final)
     if flatten:
-        result = flatten_source(result)
+        result = flatten_source(result, s_fn=s_fn, str_key=str_key)
     return result
