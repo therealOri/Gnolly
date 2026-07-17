@@ -24,7 +24,7 @@ import random
 import secrets
 
 from .namegen import random_confusable_name
-from .strcodec import _enc_str
+from .strcodec import _enc_str, _bool_int_expr
 
 __all__ = ["flatten_source"]
 
@@ -38,24 +38,16 @@ def _tok_value(rng: random.Random) -> int:
 
 
 def _tok_expr(n: int, rng: random.Random) -> str:
-    """Render an int as a small reversible arithmetic expression, in the
-    same spirit as the rest of the stub's number obfuscation, so state
-    tokens don't stick out as bare integer literals."""
-    k = secrets.randbelow(0xFFFF) + 1
-    choice = secrets.randbelow(3)
-    if choice == 0:
-        return f"({n ^ k} ^ {k})"
-    elif choice == 1:
-        return f"({n + k} - {k})"
-    else:
-        return f"({n - k} + {k})"
+    """Render a state token as boolean-shift arithmetic (see
+    strcodec._bool_int_expr)"""
+    return _bool_int_expr(n, rng)
 
 
 def _junk_line(rng: random.Random, used: set) -> str:
     name = random_confusable_name(rng, used, length=rng.randint(6, 11))
     a = secrets.randbelow(0xEFFF) + 0x1000
     b = secrets.randbelow(0xEFFF) + 0x1000
-    return f"{name} = {a} ^ {b}"
+    return f"{name} = {_bool_int_expr(a, rng)} ^ {_bool_int_expr(b, rng)}"
 
 
 def _line_indent(line: str) -> str:
@@ -120,7 +112,7 @@ def _emit_dispatch(
             this exact order.
     indent: the indentation prefix the emitted skeleton (STATE=/while/if)
             itself sits at. Block content is indented 8 spaces deeper.
-    exec_hide_eligible: parallel to "blocks" -> only blocks flagged True
+    exec_hide_eligible: parallel to blocks -> only blocks flagged True
             may be replaced with an exec()-hidden form. This exists so
             callers can exclude any block that executes before `s_fn`
             itself is defined.
