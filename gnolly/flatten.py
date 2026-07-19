@@ -24,7 +24,7 @@ import random
 import secrets
 
 from .namegen import random_confusable_name
-from .strcodec import _enc_str, _bool_int_expr
+from .strcodec import _enc_str, _bool_int_expr, _render_int
 
 __all__ = ["flatten_source"]
 
@@ -38,9 +38,8 @@ def _tok_value(rng: random.Random) -> int:
 
 
 def _tok_expr(n: int, rng: random.Random) -> str:
-    """Render a state token as boolean-shift arithmetic (see
-    strcodec._bool_int_expr)"""
-    return _bool_int_expr(n, rng)
+    """Render a state token using the shared dialect registry."""
+    return _render_int(n, rng, expensive_ok=True, expensive_frac=0.15)
 
 
 def _junk_line(rng: random.Random, used: set) -> str:
@@ -93,41 +92,45 @@ def _exec_hide(block: list[str], s_fn: str, str_key: bytes) -> list[str] | None:
 
 # ---------------------------------------------------------------------------
 # Core block -> dispatch-loop emitter
+#
+# Four genuinely different control-flow mechanisms produce the same
+# observable behavior (run these blocks, in this order) via different
+# underlying constructs, so a reader (or a script) that's fully solved
+# one still has two more to work out -> they don't share bytecode ops,
+# and two of the three don't even share the "STATE = ..." transition
+# idiom the other relies on:
+
 # ---------------------------------------------------------------------------
 
-def _emit_dispatch(
+_MECHANISMS = ("while_if", "match_case", "try_except", "dict_next")
+
+# A single elif chain reliably compiles up to ~5,900-5,950 branches before
+# CPython's parser fails with a MemoryError. This threshold sits well
+# below that with a wide safety margin and is large enough that it's never
+# hit by ordinary suites, yet is small enough that even a very large protected
+# file's biggest single suite can't realistically approach the real
+# limit before this kicks in and forces useage of the one mechanism that has no
+# such ceiling.
+_LARGE_BRANCH_THRESHOLD = 1500
+
+
+def _build_branches(
     blocks: list[list[str]],
-    indent: str,
+    body_indent: str,
     rng: random.Random,
     used_names: set,
-    n_decoys: int = 0,
-    exec_hide_frac: float = 0.0,
-    s_fn: str | None = None,
-    str_key: bytes | None = None,
-    exec_hide_eligible: list[bool] | None = None,
-) -> list[str]:
-    """
-    blocks: ordered list of statement-groups (each a list of lines, at
-            their original absolute indentation) that must execute in
-            this exact order.
-    indent: the indentation prefix the emitted skeleton (STATE=/while/if)
-            itself sits at. Block content is indented 8 spaces deeper.
-    exec_hide_eligible: parallel to blocks -> only blocks flagged True
-            may be replaced with an exec()-hidden form. This exists so
-            callers can exclude any block that executes before `s_fn`
-            itself is defined.
-    Returns the full replacement lines, at `indent` level.
-    """
+    n_decoys: int,
+    exec_hide_frac: float,
+    s_fn: str | None,
+    str_key: bytes | None,
+    exec_hide_eligible: list[bool],
+) -> tuple[list[int], int, list[tuple[int, list[str], int]]]:
+    """Shared across all mechanisms: pick tokens, decide exec-hiding,
+    build decoys. Returns (tokens, done_token, branches) where each
+    branch is (token, content_lines, next_token). content_lines does
+    NOT include the state transition itself; each mechanism's renderer
+    adds its own version of that."""
     n = len(blocks)
-    if n == 0:
-        return []
-    if n == 1 and n_decoys == 0:
-        return blocks[0]
-    if exec_hide_eligible is None:
-        exec_hide_eligible = [True] * n
-
-    state_var = random_confusable_name(rng, used_names, length=rng.randint(8, 13))
-
     values: set = set()
     while len(values) < n + 1:
         values.add(_tok_value(rng))
@@ -136,9 +139,7 @@ def _emit_dispatch(
     tokens = values[:n]
     done_token = values[n]
 
-    body_indent = indent + " " * 8
-
-    branches = []  # (token_value, rendered_lines)
+    branches: list[tuple[int, list[str], int]] = []
     for i, block in enumerate(blocks):
         next_tok = tokens[i + 1] if i + 1 < n else done_token
         dedented = _dedent_block(block)
@@ -150,8 +151,7 @@ def _emit_dispatch(
                 content = [body_indent + line for line in hidden]
         if content is None:
             content = [body_indent + line if line.strip() else line for line in dedented]
-        content.append(f"{body_indent}{state_var} = {_tok_expr(next_tok, rng)}")
-        branches.append((tokens[i], content))
+        branches.append((tokens[i], content, next_tok))
 
     for _ in range(n_decoys):
         decoy_tok = _tok_value(rng)
@@ -160,20 +160,139 @@ def _emit_dispatch(
         values.append(decoy_tok)
         n_junk = rng.randint(1, 3)
         decoy_body = [body_indent + _junk_line(rng, used_names) for _ in range(n_junk)]
-        branches.append((decoy_tok, decoy_body))
+        # A decoy's "next token" is itself. It's never reached by any
+        # real transition, so what it would transition to is moot; this
+        # just keeps every branch's shape (content + transition) uniform.
+        branches.append((decoy_tok, decoy_body, decoy_tok))
 
     rng.shuffle(branches)
+    return tokens, done_token, branches
 
+
+def _render_while_if(state_var, tokens, done_token, branches, indent, body_indent, rng) -> list[str]:
     out = [f"{indent}{state_var} = {_tok_expr(tokens[0], rng)}"]
     out.append(f"{indent}while {state_var} != {_tok_expr(done_token, rng)}:")
     kw = "if"
-    for tok, content in branches:
+    for tok, content, next_tok in branches:
+        out.append(f"{body_indent[:-4]}{kw} {state_var} == {_tok_expr(tok, rng)}:")
+        out.extend(content)
+        out.append(f"{body_indent}{state_var} = {_tok_expr(next_tok, rng)}")
+        kw = "elif"
+    out.append(f"{body_indent[:-4]}else:")
+    out.append(f"{body_indent}break")
+    return out
+
+
+def _render_match_case(state_var, tokens, done_token, branches, indent, body_indent, rng) -> list[str]:
+    out = [f"{indent}{state_var} = {_tok_expr(tokens[0], rng)}"]
+    out.append(f"{indent}while {state_var} != {_tok_expr(done_token, rng)}:")
+    out.append(f"{body_indent[:-4]}match {state_var}:")
+    for tok, content, next_tok in branches:
+        out.append(f"{body_indent}case _ if {state_var} == {_tok_expr(tok, rng)}:")
+        out.extend(body_indent + "    " + line[len(body_indent):] if line.startswith(body_indent) else line
+                    for line in content)
+        out.append(f"{body_indent}    {state_var} = {_tok_expr(next_tok, rng)}")
+    out.append(f"{body_indent}case _:")
+    out.append(f"{body_indent}    break")
+    return out
+
+
+def _render_try_except(state_var, tokens, done_token, branches, indent, body_indent, rng, used_names) -> list[str]:
+    exc_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
+    exc_var = random_confusable_name(rng, used_names, length=rng.randint(4, 9))
+    local_used: set = set()
+    p_self, p_val = (random_confusable_name(rng, local_used, 1) for _ in range(2))
+    out = [f"{indent}class {exc_name}(Exception):"]
+    out.append(f"{indent}    def __init__({p_self}, {p_val}):")
+    out.append(f"{indent}        {p_self}.t = {p_val}")
+    out.append(f"{indent}{state_var} = {_tok_expr(tokens[0], rng)}")
+    out.append(f"{indent}while {state_var} != {_tok_expr(done_token, rng)}:")
+    out.append(f"{body_indent[:-4]}try:")
+    kw = "if"
+    for tok, content, next_tok in branches:
+        out.append(f"{body_indent}{kw} {state_var} == {_tok_expr(tok, rng)}:")
+        out.extend(body_indent + "    " + line[len(body_indent):] if line.startswith(body_indent) else line
+                    for line in content)
+        out.append(f"{body_indent}    raise {exc_name}({_tok_expr(next_tok, rng)})")
+        kw = "elif"
+    out.append(f"{body_indent}else:")
+    out.append(f"{body_indent}    raise {exc_name}({_tok_expr(done_token, rng)})")
+    out.append(f"{body_indent[:-4]}except {exc_name} as {exc_var}:")
+    out.append(f"{body_indent}{state_var} = {exc_var}.t")
+    return out
+
+
+def _render_dict_next(state_var, tokens, done_token, branches, indent, body_indent, rng, used_names) -> list[str]:
+    table_var = random_confusable_name(rng, used_names, length=rng.randint(8, 13))
+    out = [f"{indent}{table_var} = {{}}"]
+    for tok, _, nxt in branches:
+        out.append(f"{indent}{table_var}[{_tok_expr(tok, rng)}] = {_tok_expr(nxt, rng)}")
+    out.append(f"{indent}{state_var} = {_tok_expr(tokens[0], rng)}")
+    out.append(f"{indent}while {state_var} != {_tok_expr(done_token, rng)}:")
+    kw = "if"
+    for tok, content, next_tok in branches:
         out.append(f"{body_indent[:-4]}{kw} {state_var} == {_tok_expr(tok, rng)}:")
         out.extend(content)
         kw = "elif"
     out.append(f"{body_indent[:-4]}else:")
     out.append(f"{body_indent}break")
+    out.append(f"{body_indent[:-4]}{state_var} = {table_var}[{state_var}]")
     return out
+
+
+def _emit_dispatch(
+    blocks: list[list[str]],
+    indent: str,
+    rng: random.Random,
+    used_names: set,
+    n_decoys: int = 0,
+    exec_hide_frac: float = 0.0,
+    s_fn: str | None = None,
+    str_key: bytes | None = None,
+    exec_hide_eligible: list[bool] | None = None,
+    mechanism: str | None = None,
+) -> list[str]:
+    """
+    blocks: ordered list of statement-groups that must execute in this exact order.
+    indent: the indentation prefix the emitted skeleton itself sits at.
+            Block content is indented 8 spaces deeper.
+    exec_hide_eligible: parallel to blocks & only blocks that are flagged True
+            may be replaced with an exec()-hidden form.
+    mechanism: one of "while_if" / "match_case" / "try_except" /
+            "dict_next", or None to pick randomly. Overridden
+            regardless (see _LARGE_BRANCH_THRESHOLD below) once branch
+            count gets large enough that the choice stops being safe.
+    Returns the full replacement lines, at "indent" level.
+    """
+    n = len(blocks)
+    if n == 0:
+        return []
+    if n == 1 and n_decoys == 0:
+        return blocks[0]
+    if exec_hide_eligible is None:
+        exec_hide_eligible = [True] * n
+
+    if n + n_decoys > _LARGE_BRANCH_THRESHOLD:
+        mechanism = "match_case"
+    elif mechanism is None:
+        mechanism = rng.choice(_MECHANISMS)
+
+    state_var = random_confusable_name(rng, used_names, length=rng.randint(8, 13))
+    body_indent = indent + " " * 8
+
+    tokens, done_token, branches = _build_branches(
+        blocks, body_indent, rng, used_names, n_decoys,
+        exec_hide_frac, s_fn, str_key, exec_hide_eligible,
+    )
+
+    if mechanism == "match_case":
+        return _render_match_case(state_var, tokens, done_token, branches, indent, body_indent, rng)
+    elif mechanism == "try_except":
+        return _render_try_except(state_var, tokens, done_token, branches, indent, body_indent, rng, used_names)
+    elif mechanism == "dict_next":
+        return _render_dict_next(state_var, tokens, done_token, branches, indent, body_indent, rng, used_names)
+    else:
+        return _render_while_if(state_var, tokens, done_token, branches, indent, body_indent, rng)
 
 
 # ---------------------------------------------------------------------------
