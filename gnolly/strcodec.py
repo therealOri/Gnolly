@@ -140,13 +140,12 @@ def _hidden_import_call(rng: random.Random | None = None) -> str:
     anywhere in the source.
 
     Mirrors the pattern gnolly/stub.py already uses for its own
-    internal .so-loading imports (see the `imp_fn` setup there).
+    internal .so-loading imports (see the "imp_fn" setup there).
     """
     if rng is None:
         rng = random.Random(secrets.randbits(64))
     builtins_key = _hidden_str_expr("__builtins__", rng)
     import_attr = _hidden_str_expr("__import__", rng)
-    init_attr = _hidden_str_expr("__init__", rng)
     used_local: set = set()
     b = random_confusable_name(rng, used_local, length=rng.randint(6, 10))
     return (f"(lambda {b}: getattr({b}, {import_attr}) "
