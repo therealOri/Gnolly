@@ -36,6 +36,12 @@ import ast
 import random
 import secrets
 from .namegen import random_confusable_name
+from .strcodec import (
+    _render_int as _strcodec_render_int,
+    _bool_int_expr as _bool_int_expr_text,
+    _obf_int_lambda as _obf_int_lambda_text,
+    _hidden_import_attr as _hidden_import_attr_text,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -100,7 +106,10 @@ def _renameable(name: str) -> bool:
 class _Collector(ast.NodeVisitor):
     def __init__(self, pool: _NamePool):
         self._pool = pool
-        self._in_class = 0   # depth (inside a class body, skip method names)
+        self._in_class = 0        # depth (inside a class body, skip method names)
+        self._class_body_depth = 0  # >0 only while directly at class-body statement
+                                     # level (not inside a nested method/function) --
+                                     # see visit_Name for why this matters
 
     def _reg(self, name: str):
         if _renameable(name):
@@ -110,19 +119,25 @@ class _Collector(ast.NodeVisitor):
         # Register function name only if NOT inside a class body
         if self._in_class == 0:
             self._reg(node.name)
-        # Always recurse into body (but at class depth 0 for nested functions)
+        saved = self._class_body_depth
+        self._class_body_depth = 0
         self.generic_visit(node)
+        self._class_body_depth = saved
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_ClassDef(self, node):
         self._reg(node.name)
         self._in_class += 1
+        self._class_body_depth += 1
         self.generic_visit(node)
+        self._class_body_depth -= 1
         self._in_class -= 1
 
     def visit_Name(self, node):
         if isinstance(node.ctx, ast.Store):
+            if self._class_body_depth > 0:
+                return
             self._reg(node.id)
 
     def visit_Import(self, node):
@@ -136,84 +151,38 @@ class _Collector(ast.NodeVisitor):
 # Passes 3 & 4 -> Constant encryption helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _render_int_ast(n: int, rng: random.Random | None = None, expensive_ok: bool = False) -> ast.expr:
+    """
+    AST equivalent of gnolly.strcodec._render_int: rather than
+    re-implementing every dialect twice, this renders "n" via the exact
+    same dialect registry (as source text) and parses that text back
+    into a real AST subtree. One source of truth for every dialect
+    means the AST-side obfuscation and the stub-generator-side obfuscation
+    always stay in sync. A new dialect added
+    to strcodec.py is available on both sides automatically.
+    """
+    text = _strcodec_render_int(n, rng, expensive_ok=expensive_ok)
+    return ast.parse(text, mode="eval").body
+
+
 def _bool_int_ast(n: int, rng: random.Random | None = None) -> ast.expr:
-    """
-    AST equivalent of gnolly.strcodec._bool_int_expr: builds an
-    expression tree that sums one shifted True/False term per bit of
-    "n", plus a couple of shuffled-in zero-value filler terms, so
-    the constant reads as boolean arithmetic rather than a bare digit.
-    """
-    if rng is None:
-        rng = random.Random(secrets.randbits(64))
-    if n == 0:
-        return ast.BoolOp(op=ast.And(), values=[ast.Constant(value=True), ast.Constant(value=False)])
-    neg = n < 0
-    m = -n if neg else n
-    bits = m.bit_length()
-    terms: list[ast.expr] = []
-    for i in range(bits):
-        bit = (m >> i) & 1
-        b = ast.Constant(value=bool(bit))
-        if i == 0:
-            terms.append(b)
-        else:
-            style = rng.randrange(2)
-            if style == 0:
-                terms.append(ast.BinOp(left=b, op=ast.LShift(), right=ast.Constant(value=i)))
-            else:
-                terms.append(ast.BinOp(left=b, op=ast.Mult(), right=ast.Constant(value=1 << i)))
-    for _ in range(rng.randint(0, 2)):
-        zero = ast.BinOp(left=ast.Constant(value=True), op=ast.Sub(), right=ast.Constant(value=True))
-        terms.insert(rng.randrange(len(terms) + 1), zero)
-    rng.shuffle(terms)
-    expr = terms[0]
-    for t in terms[1:]:
-        expr = ast.BinOp(left=expr, op=ast.Add(), right=t)
-    if neg:
-        expr = ast.UnaryOp(op=ast.USub(), operand=expr)
-    return expr
+    """AST equivalent of gnolly.strcodec._bool_int_expr (parses that
+    function's text output -> see _render_int_ast)."""
+    return ast.parse(_bool_int_expr_text(n, rng), mode="eval").body
 
 
 def _obf_int_lambda_ast(n: int) -> ast.expr:
-    """
-    AST equivalent of gnolly.strcodec._obf_int_lambda: represents a
-    single int as an immediately-invoked lambda that computes it via one
-    of several small reversible arithmetic formulas, randomly chosen per
-    call.
-    """
-    k = secrets.randbelow(0xFFFF) + 1
-    choice = secrets.randbelow(5)
-    if choice == 0:
-        body = ast.BinOp(left=ast.Constant(value=n ^ k), op=ast.BitXor(),
-                          right=ast.Constant(value=k))
-    elif choice == 1:
-        body = ast.BinOp(left=ast.Constant(value=n + k), op=ast.Sub(),
-                          right=ast.Constant(value=k))
-    elif choice == 2:
-        body = ast.BinOp(left=ast.Constant(value=n - k), op=ast.Add(),
-                          right=ast.Constant(value=k))
-    elif choice == 3:
-        body = ast.BinOp(left=ast.Constant(value=n * k), op=ast.FloorDiv(),
-                          right=ast.Constant(value=k))
-    else:
-        r = secrets.randbelow(k)
-        body = ast.BinOp(left=ast.Constant(value=n * k + r), op=ast.FloorDiv(),
-                          right=ast.Constant(value=k))
-    lam = ast.Lambda(
-        args=ast.arguments(posonlyargs=[], args=[], vararg=None,
-                            kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
-        body=body)
-    return ast.Call(func=lam, args=[], keywords=[])
+    """AST equivalent of gnolly.strcodec._obf_int_lambda (parses that
+    function's text output -> see _render_int_ast)."""
+    return ast.parse(_obf_int_lambda_text(n), mode="eval").body
 
 
 def _split_int_list_ast(target: list) -> ast.expr:
     """
-    AST equivalent of gnolly.strcodec._split_int_list_expr: an expression
-    that evaluates to "target" at runtime without ever containing "target"
-    or any of its individual values as a literal anywhere. Splits
-    into two independently-random component lists (mask, other = target
-    XOR mask), each element of which is itself an _obf_int_lambda_ast()
-    call, recombined via a lambda inside a zip()-based comprehension.
+    AST equivalent of gnolly.strcodec._split_int_list_expr
+    (see _render_int_ast -> adjacent numbers in the same list may use
+    different dialects), and the two lists are recombined via one of a
+    few equally-valid shapes, re-rolled per call.
     """
     if not target:
         return ast.List(elts=[], ctx=ast.Load())
@@ -223,31 +192,40 @@ def _split_int_list_ast(target: list) -> ast.expr:
     used: set = set()
     pa, pb, va, vb = (random_confusable_name(rng, used, 1) for _ in range(4))
 
-    mask_list  = ast.List(elts=[_obf_int_lambda_ast(m) for m in mask], ctx=ast.Load())
-    other_list = ast.List(elts=[_obf_int_lambda_ast(o) for o in other], ctx=ast.Load())
-
-    combine_lam = ast.Lambda(
-        args=ast.arguments(
-            posonlyargs=[], args=[ast.arg(arg=pa), ast.arg(arg=pb)],
-            vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
-        body=ast.BinOp(left=ast.Name(id=pa, ctx=ast.Load()), op=ast.BitXor(),
-                        right=ast.Name(id=pb, ctx=ast.Load())))
-
-    elt = ast.Call(
-        func=combine_lam,
-        args=[ast.Name(id=va, ctx=ast.Load()), ast.Name(id=vb, ctx=ast.Load())],
-        keywords=[])
-
+    mask_list  = ast.List(elts=[_render_int_ast(m, rng) for m in mask], ctx=ast.Load())
+    other_list = ast.List(elts=[_render_int_ast(o, rng) for o in other], ctx=ast.Load())
     zip_call = ast.Call(func=ast.Name(id="zip", ctx=ast.Load()),
                          args=[mask_list, other_list], keywords=[])
+    va_load, vb_load = ast.Name(id=va, ctx=ast.Load()), ast.Name(id=vb, ctx=ast.Load())
+    pair_target = ast.Tuple(
+        elts=[ast.Name(id=va, ctx=ast.Store()), ast.Name(id=vb, ctx=ast.Store())],
+        ctx=ast.Store())
 
-    return ast.ListComp(
-        elt=elt,
-        generators=[ast.comprehension(
-            target=ast.Tuple(
-                elts=[ast.Name(id=va, ctx=ast.Store()), ast.Name(id=vb, ctx=ast.Store())],
-                ctx=ast.Store()),
-            iter=zip_call, ifs=[], is_async=0)])
+    style = rng.randrange(3)
+    if style == 0:
+        # (lambda pa, pb: pa ^ pb)(va, vb) inside a zip()-based comprehension
+        combine_lam = ast.Lambda(
+            args=ast.arguments(
+                posonlyargs=[], args=[ast.arg(arg=pa), ast.arg(arg=pb)],
+                vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+            body=ast.BinOp(left=ast.Name(id=pa, ctx=ast.Load()), op=ast.BitXor(),
+                            right=ast.Name(id=pb, ctx=ast.Load())))
+        elt = ast.Call(func=combine_lam, args=[va_load, vb_load], keywords=[])
+        return ast.ListComp(elt=elt, generators=[
+            ast.comprehension(target=pair_target, iter=zip_call, ifs=[], is_async=0)])
+    elif style == 1:
+        # plain comprehension, no lambda wrapper
+        elt = ast.BinOp(left=va_load, op=ast.BitXor(), right=vb_load)
+        return ast.ListComp(elt=elt, generators=[
+            ast.comprehension(target=pair_target, iter=zip_call, ifs=[], is_async=0)])
+    else:
+        # list(map(operator.xor, mask, other)) -> module/attr names hidden
+        # by building via the text-based helper and parsing it back into
+        # an AST subtree (same trick _render_int_ast uses).
+        xor_attr = ast.parse(_hidden_import_attr_text("operator", "xor"), mode="eval").body
+        map_call = ast.Call(func=ast.Name(id="map", ctx=ast.Load()),
+                             args=[xor_attr, mask_list, other_list], keywords=[])
+        return ast.Call(func=ast.Name(id="list", ctx=ast.Load()), args=[map_call], keywords=[])
 
 
 def _make_decoder_def(dec_name: str, key: bytes) -> ast.stmt:
@@ -311,9 +289,9 @@ def _enc_int(n: int) -> ast.expr:
     k = secrets.randbelow(0xFFFF) + 1
     rng = random.Random(secrets.randbits(64))
     return ast.BinOp(
-        left=_bool_int_ast(n ^ k, rng),
+        left=_render_int_ast(n ^ k, rng, expensive_ok=True),
         op=ast.BitXor(),
-        right=_bool_int_ast(k, rng))
+        right=_render_int_ast(k, rng, expensive_ok=True))
 
 def _enc_float(f: float, key: bytes, dec_getter) -> ast.expr:
     return ast.Call(
@@ -341,6 +319,35 @@ def _enc_bytes(b: bytes, key: bytes, dec_getter) -> ast.expr:
 # Pass 5 -> Import obfuscation
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _hidden_import_call_ast(key: bytes, dec_getter) -> ast.expr:
+    """
+    AST equivalent of gnolly.strcodec._hidden_import_call
+    """
+    b = "__builtins__"
+    i = "__import__"
+    ii = "__init__"
+    builtins_key = _enc_str(b, key, dec_getter)
+    import_attr = _enc_str(i, key, dec_getter)
+    init_attr = _enc_str(ii, key, dec_getter)
+    globals_call = ast.Call(func=ast.Name(id="globals", ctx=ast.Load()), args=[], keywords=[])
+    builtins_obj = ast.Subscript(value=globals_call, slice=builtins_key, ctx=ast.Load())
+
+    param = "B"
+    param_load = ast.Name(id=param, ctx=ast.Load())
+    getattr_branch = ast.Call(func=ast.Name(id="getattr", ctx=ast.Load()),
+                               args=[param_load, import_attr, init_attr], keywords=[])
+    subscript_branch = ast.Subscript(value=param_load, slice=import_attr, ctx=ast.Load())
+    isinstance_call = ast.Call(func=ast.Name(id="isinstance", ctx=ast.Load()),
+                                args=[param_load, ast.Name(id="dict", ctx=ast.Load())], keywords=[])
+    body = ast.IfExp(test=ast.UnaryOp(op=ast.Not(), operand=isinstance_call),
+                      body=getattr_branch, orelse=subscript_branch)
+    lam = ast.Lambda(
+        args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=param)], vararg=None,
+                            kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+        body=body)
+    return ast.Call(func=lam, args=[builtins_obj], keywords=[])
+
+
 def _obf_import(node: ast.Import, pool: _NamePool, key: bytes, dec_getter) -> list[ast.stmt]:
     stmts = []
     for alias in node.names:
@@ -350,7 +357,7 @@ def _obf_import(node: ast.Import, pool: _NamePool, key: bytes, dec_getter) -> li
         stmts.append(ast.Assign(
             targets=[ast.Name(id=target, ctx=ast.Store())],
             value=ast.Call(
-                func=ast.Name(id="__import__", ctx=ast.Load()),
+                func=_hidden_import_call_ast(key, dec_getter),
                 args=[_enc_str(mod, key, dec_getter)],
                 keywords=[],
             ),
@@ -371,7 +378,7 @@ def _obf_import_from(node: ast.ImportFrom, pool: _NamePool, key: bytes, dec_gett
     stmts.append(ast.Assign(
         targets=[ast.Name(id=tmp, ctx=ast.Store())],
         value=ast.Call(
-            func=ast.Name(id="__import__", ctx=ast.Load()),
+            func=_hidden_import_call_ast(key, dec_getter),
             args=[_enc_str(mod, key, dec_getter)],
             keywords=[ast.keyword(arg="fromlist",
                                   value=ast.List(
@@ -642,7 +649,7 @@ class _Transformer(ast.NodeTransformer):
             preamble.append(ast.Assign(
                 targets=[ast.Name(id=self._bi_var, ctx=ast.Store())],
                 value=ast.Call(
-                    func=ast.Name(id="__import__", ctx=ast.Load()),
+                    func=_hidden_import_call_ast(self._str_key, self._dec),
                     args=[self._enc("builtins")], keywords=[])))
         node.body = preamble + noise_stmts + node.body
         return node
