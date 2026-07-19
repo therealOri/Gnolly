@@ -325,17 +325,15 @@ def _hidden_import_call_ast(key: bytes, dec_getter) -> ast.expr:
     """
     b = "__builtins__"
     i = "__import__"
-    ii = "__init__"
     builtins_key = _enc_str(b, key, dec_getter)
     import_attr = _enc_str(i, key, dec_getter)
-    init_attr = _enc_str(ii, key, dec_getter)
     globals_call = ast.Call(func=ast.Name(id="globals", ctx=ast.Load()), args=[], keywords=[])
     builtins_obj = ast.Subscript(value=globals_call, slice=builtins_key, ctx=ast.Load())
 
     param = "B"
     param_load = ast.Name(id=param, ctx=ast.Load())
     getattr_branch = ast.Call(func=ast.Name(id="getattr", ctx=ast.Load()),
-                               args=[param_load, import_attr, init_attr], keywords=[])
+                               args=[param_load, import_attr], keywords=[])
     subscript_branch = ast.Subscript(value=param_load, slice=import_attr, ctx=ast.Load())
     isinstance_call = ast.Call(func=ast.Name(id="isinstance", ctx=ast.Load()),
                                 args=[param_load, ast.Name(id="dict", ctx=ast.Load())], keywords=[])
