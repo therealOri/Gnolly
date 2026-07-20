@@ -200,11 +200,8 @@ def _render_match_case(state_var, tokens, done_token, branches, indent, body_ind
 def _render_try_except(state_var, tokens, done_token, branches, indent, body_indent, rng, used_names) -> list[str]:
     exc_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
     exc_var = random_confusable_name(rng, used_names, length=rng.randint(4, 9))
-    local_used: set = set()
-    p_self, p_val = (random_confusable_name(rng, local_used, 1) for _ in range(2))
     out = [f"{indent}class {exc_name}(Exception):"]
-    out.append(f"{indent}    def __init__({p_self}, {p_val}):")
-    out.append(f"{indent}        {p_self}.t = {p_val}")
+    out.append(f"{indent}    pass")
     out.append(f"{indent}{state_var} = {_tok_expr(tokens[0], rng)}")
     out.append(f"{indent}while {state_var} != {_tok_expr(done_token, rng)}:")
     out.append(f"{body_indent[:-4]}try:")
@@ -218,7 +215,7 @@ def _render_try_except(state_var, tokens, done_token, branches, indent, body_ind
     out.append(f"{body_indent}else:")
     out.append(f"{body_indent}    raise {exc_name}({_tok_expr(done_token, rng)})")
     out.append(f"{body_indent[:-4]}except {exc_name} as {exc_var}:")
-    out.append(f"{body_indent}{state_var} = {exc_var}.t")
+    out.append(f"{body_indent}{state_var} = {exc_var}.args[0]")
     return out
 
 
