@@ -30,7 +30,7 @@ from __future__ import annotations
 import random
 
 _SHAPE_I = ('I', '\u0406', '\u0399')
-_SHAPE_L = ('l', '\u04cf', '\u2170')
+_SHAPE_L = ('l', '\u04cf', '\u01c0')
 _SHAPE_O = ('O', '\u041e', '\u039f')
 _SHAPE_0 = ('0',)
 
