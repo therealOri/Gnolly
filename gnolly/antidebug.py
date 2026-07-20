@@ -95,12 +95,12 @@ def generate_antidebug_lines(
     # ── Check 1: trace hook ───────────────────────────────────────────────────
     a(f"{vt} = getattr({h_sys}, {s('gettrace')})()")
     a(f"if {vt} is not {sing('None')}: {exit_call}")
-    a(f"vt = {sing('None')}")
+    a(f"{vt} = {sing('None')}")
 
     # ── Check 2: profile hook ─────────────────────────────────────────────────
     a(f"{vp} = getattr({h_sys}, {s('getprofile')})()")
     a(f"if {vp} is not {sing('None')}: {exit_call}")
-    a(f"vp = {sing('None')}")
+    a(f"{vp} = {sing('None')}")
 
     # ── Check 3: known debug modules in sys.modules ───────────────────────────
     a(f"{vm} = getattr({h_sys}, {s('modules')})")
@@ -116,7 +116,7 @@ def generate_antidebug_lines(
     a(f"    getattr({h_sys}, {s('settrace')})({sing('None')})")
     a(f"    {vt} = getattr({h_sys}, {s('gettrace')})()")
     a(f"    if {vt} is not {sing('None')}: {exit_call}")
-    a(f"    vt = {sing('None')}")
+    a(f"    {vt} = {sing('None')}")
     a(f"except Exception: {exit_call}")
 
     # ── Check 5: timing gate ──────────────────────────────────────────────────
