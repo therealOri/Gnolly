@@ -39,6 +39,7 @@ from .crypto      import encrypt, _MAGIC, _VERSION, _SALT_LEN, _IV_LEN, _TAG_LEN
 from .encoding    import GnollyCodec
 from .stub        import generate_stub
 from .minify      import minify_source
+from .pack        import pack_source
 from .build_core  import ensure_core
 from .binding     import bind_salt, collect_fingerprint, fingerprint_from_hex
 from .integrity   import collect_runtime_hashes, fold_integrity
@@ -70,6 +71,7 @@ def protect(
     silent: bool = True,
     flatten: bool = True,
     minify: bool = True,
+    pack: bool = True,
 ) -> str:
     """
     Parameters
@@ -93,6 +95,12 @@ def protect(
                       (see gnolly.minify). On by default; disable via
                       --no-minify on the CLI if you want to inspect the
                       unminified output.
+    pack            : toggle final compression pass (see gnolly.pack)
+                      This replaces the generated stub with a tiny bootstrap
+                      plus one opaque compressed blob.
+                      On by default; disable via --no-pack on the CLI
+                      if you want the readable (flattened/minified)
+                      stub as the shipped output instead.
     """
     def _log(msg: str) -> None:
         if verbose:
@@ -185,6 +193,9 @@ def protect(
     if minify:
         _log("Minifying stub …")
         stub_source = minify_source(stub_source)
+    if pack:
+        _log("Packing stub …")
+        stub_source = pack_source(stub_source)
     return stub_source
 
 
