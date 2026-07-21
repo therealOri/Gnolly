@@ -487,7 +487,9 @@ class TestAntiDebug:
 
     def test_antidebug_lines_in_stub(self):
         """Anti-debug checks are present as obfuscated lines in the stub."""
-        stub = self._make_stub()
+        from gnolly.pipeline import protect
+        from gnolly.keymanager import generate_key
+        stub = protect("print('x')", generate_key(), pack=False)
         # The stub should contain settrace and gettrace references (encoded)
         # We can't check by name since they're encoded, but we can verify
         # the stub has significantly more lines than a stub without antidebug
