@@ -153,15 +153,27 @@ def _hidden_import_call(rng: random.Random | None = None) -> str:
             f"(globals()[{builtins_key}])")
 
 
+def _attrgetter_ref(rng: random.Random) -> str:
+    """Expression that evaluates to operator.attrgetter."""
+    mod_expr = f"{_hidden_import_call(rng)}({_hidden_str_expr('operator', rng)})"
+    attr_expr = _hidden_str_expr("attrgetter", rng)
+    return f"getattr({mod_expr}, {attr_expr})"
+
+
 def _hidden_import_attr(module: str, attr: str, rng: random.Random | None = None) -> str:
     """Expression equivalent to getattr(__import__(module), attr), with
     the module name, the attribute name, and the __import__ call itself
-    all hidden -> see _hidden_import_call."""
+    all hidden -> see _hidden_import_call. (instead of any of them
+    appearing as plain literals/identifiers.)
+    """
     if rng is None:
         rng = random.Random(secrets.randbits(64))
     mod_expr = f"{_hidden_import_call(rng)}({_hidden_str_expr(module, rng)})"
     attr_expr = _hidden_str_expr(attr, rng)
-    return f"getattr({mod_expr}, {attr_expr})"
+    if rng.randrange(2) == 0:
+        return f"getattr({mod_expr}, {attr_expr})"
+    else:
+        return f"{_attrgetter_ref(rng)}({attr_expr})({mod_expr})"
 
 
 def _dialect_bitfloat(n: int, rng: random.Random) -> str | None:
@@ -326,6 +338,14 @@ def _enc_bytes_as_str(b: bytes, key: bytes) -> str:
     return _split_int_list_expr(target)
 
 
+def _itemgetter_ref(rng: random.Random) -> str:
+    """Expression that evaluates to operator.itemgetter, built the same
+    non-recursive way as _attrgetter_ref."""
+    mod_expr = f"{_hidden_import_call(rng)}({_hidden_str_expr('operator', rng)})"
+    attr_expr = _hidden_str_expr("itemgetter", rng)
+    return f"getattr({mod_expr}, {attr_expr})"
+
+
 def _str_decoder_lambda(fn_name: str, key: bytes) -> str:
     """
     Returns a lambda that decodes int lists back to strings.
@@ -340,18 +360,22 @@ def _str_decoder_lambda(fn_name: str, key: bytes) -> str:
     rng = random.Random(secrets.randbits(64))
     used: set = set()
     p_in, p_i, p_b = (random_confusable_name(rng, used, 1) for _ in range(3))
-    style = rng.randrange(3)
+    style = rng.randrange(4)
     if style == 0:
         body = (f"''.join(chr({p_b} ^ {repr(key)}[{p_i} % {kl}]) "
                 f"for {p_i}, {p_b} in enumerate({p_in}))")
     elif style == 1:
         body = (f"''.join(map(lambda {p_i}, {p_b}: chr({p_b} ^ {repr(key)}[{p_i} % {kl}]), "
                 f"range(len({p_in})), {p_in}))")
-    else:
+    elif style == 2:
         reduce_fn = _hidden_import_attr("functools", "reduce", rng)
         body = (f"{reduce_fn}(lambda {p_b}, {p_i}: "
                 f"{p_b} + chr({p_i}[1] ^ {repr(key)}[{p_i}[0] % {kl}]), "
                 f"enumerate({p_in}), '')")
+    else:
+        ig = _itemgetter_ref(rng)
+        body = (f"''.join(chr({p_b} ^ {ig}({p_i} % {kl})({repr(key)})) "
+                f"for {p_i}, {p_b} in enumerate({p_in}))")
     return f"{fn_name} = lambda {p_in}: {body}"
 
 
@@ -362,14 +386,18 @@ def _bytes_decoder_lambda(fn_name: str, key: bytes) -> str:
     rng = random.Random(secrets.randbits(64))
     used: set = set()
     p_in, p_i, p_b = (random_confusable_name(rng, used, 1) for _ in range(3))
-    style = rng.randrange(3)
+    style = rng.randrange(4)
     if style == 0:
         body = (f"bytes({p_b} ^ {repr(key)}[{p_i} % {kl}] "
                 f"for {p_i}, {p_b} in enumerate({p_in}))")
     elif style == 1:
         body = (f"bytes(bytearray({p_b} ^ {repr(key)}[{p_i} % {kl}] "
                 f"for {p_i}, {p_b} in enumerate({p_in})))")
-    else:
+    elif style == 2:
         body = (f"bytes(map(lambda {p_i}, {p_b}: {p_b} ^ {repr(key)}[{p_i} % {kl}], "
                 f"range(len({p_in})), {p_in}))")
+    else:
+        ig = _itemgetter_ref(rng)
+        body = (f"bytes({p_b} ^ {ig}({p_i} % {kl})({repr(key)}) "
+                f"for {p_i}, {p_b} in enumerate({p_in}))")
     return f"{fn_name} = lambda {p_in}: {body}"
