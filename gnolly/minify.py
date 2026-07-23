@@ -23,7 +23,6 @@ _SKIP_TYPES = {
     tokenize.ENDMARKER, tokenize.ENCODING,
 }
 
-
 _DANGEROUS_OP_PAIRS = {
     "!=", "%=", "&=", "**", "*=", "+=", "-=", "->", "//", "/=",
     ":=", "<<", "<=", "<>", "==", ">=", ">>", "@=", "^=", "|=",
@@ -64,13 +63,169 @@ def _logical_lines(src: str) -> list[str]:
 _MAX_TOKENIZE_LEN = 20000
 
 
+def _scan_out_of_string_commas(s: str) -> list[tuple[int, int]]:
+    """Return (index, bracket_depth) for every comma in "s" that's
+    outside a string literal, tracking bracket depth (and skipping over
+    string contents, including escapes) in a single linear pass."""
+    positions = []
+    in_str = None
+    depth = 0
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if in_str:
+            if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == in_str:
+                in_str = None
+            i += 1
+            continue
+        if c in ("\"", "'"):
+            in_str = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == ",":
+            positions.append((i, depth))
+        i += 1
+    return positions
+
+
+def _find_bracket_open(s: str, before_idx: int, target_depth: int) -> int | None:
+    """Index just after the bracket character that first brings depth
+    to "target_depth", scanning only up to "before_idx"."""
+    depth = 0
+    in_str = None
+    i = 0
+    open_pos = None
+    while i < before_idx:
+        c = s[i]
+        if in_str:
+            if c == "\\" and i + 1 < len(s):
+                i += 2
+                continue
+            if c == in_str:
+                in_str = None
+            i += 1
+            continue
+        if c in ("\"", "'"):
+            in_str = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+            if depth == target_depth:
+                open_pos = i + 1
+        elif c in ")]}":
+            depth -= 1
+        i += 1
+    return open_pos
+
+
+def _find_bracket_close(s: str, after_idx: int, target_depth: int) -> int | None:
+    """Index of the bracket character that brings depth back down from
+    "target_depth", scanning forward from "after_idx"."""
+    depth = target_depth
+    in_str = None
+    i, n = after_idx, len(s)
+    while i < n:
+        c = s[i]
+        if in_str:
+            if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == in_str:
+                in_str = None
+            i += 1
+            continue
+        if c in ("\"", "'"):
+            in_str = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == target_depth:
+                return i
+            depth -= 1
+        i += 1
+    return None
+
+
+def _tokenize_minify_fragment(fragment: str) -> str:
+    """Minimal-spacing pass for a fragment that may not be a complete
+    statement on its own (e.g. one element out of a list literal).
+    """
+    fragment = fragment.strip()
+    if not fragment:
+        return fragment
+    try:
+        toks = [
+            t for t in tokenize.generate_tokens(io.StringIO(fragment + "\n").readline)
+            if t.type not in _SKIP_TYPES and t.type != tokenize.NEWLINE
+        ]
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return fragment
+    if not toks:
+        return fragment
+    parts: list[str] = []
+    prev = None
+    for tok in toks:
+        if prev is not None and _needs_space(prev, tok):
+            parts.append(" ")
+        parts.append(tok.string)
+        prev = tok
+    return "".join(parts)
+
+
+def _minify_long_line(stripped: str) -> str:
+    """
+    Minify a single (already left-stripped) physical line too long to
+    safely tokenize in one pass, by splitting it into pieces small
+    enough to tokenize individually and reassembling.
+    """
+    comma_depths = _scan_out_of_string_commas(stripped)
+    if not comma_depths:
+        return stripped
+
+    target_depth = min(d for _, d in comma_depths)
+    split_positions = [pos for pos, d in comma_depths if d == target_depth]
+
+    open_pos = _find_bracket_open(stripped, split_positions[0], target_depth)
+    close_pos = _find_bracket_close(stripped, split_positions[-1] + 1, target_depth)
+    if open_pos is None or close_pos is None or open_pos >= close_pos:
+        return stripped
+
+    bracket_char = stripped[open_pos - 1]
+    prefix = stripped[:open_pos - 1]
+    inner = stripped[open_pos:close_pos]
+    suffix = stripped[close_pos:]
+
+    elements = []
+    start = 0
+    for pos in (p - open_pos for p in split_positions):
+        elements.append(inner[start:pos])
+        start = pos + 1
+    elements.append(inner[start:])
+
+    prefix_min = _tokenize_minify_fragment(prefix)
+    suffix_min = _tokenize_minify_fragment(suffix)
+    elements_min = [_tokenize_minify_fragment(e) for e in elements]
+
+    return prefix_min + bracket_char + ",".join(elements_min) + suffix_min
+
+
 def _render_physical_line(line: str) -> tuple[int, str]:
     """Return (indent_level, minimally-spaced text) for one physical
     line, tokenized in isolation from the rest of the file."""
     stripped = line.lstrip(" ")
     indent_level = (len(line) - len(stripped)) // 4
-    if len(line) > _MAX_TOKENIZE_LEN:
-        return indent_level, stripped
+    if len(stripped) > _MAX_TOKENIZE_LEN:
+        return indent_level, _minify_long_line(stripped)
     try:
         toks = [
             t for t in tokenize.generate_tokens(io.StringIO(stripped + "\n").readline)
@@ -115,7 +270,7 @@ def _join_simple_runs(lines: list[tuple[int, str]]) -> list[str]:
                     j += 1
                 else:
                     break
-            joined.append(" " * cur_indent + "; ".join(group))
+            joined.append(" " * cur_indent + ";".join(group))
             i = j
         else:
             joined.append(" " * cur_indent + cur_body)
