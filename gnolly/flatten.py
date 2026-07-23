@@ -25,6 +25,7 @@ import secrets
 
 from .namegen import random_confusable_name
 from .strcodec import _enc_str, _bool_int_expr, _render_int
+from .minify import minify_source
 
 __all__ = ["flatten_source"]
 
@@ -78,16 +79,63 @@ def _dedent_block(block: list[str]) -> list[str]:
 _MAX_HIDE_CHARS = 260  # keep the per-character encoding cost bounded
 
 
-def _exec_hide(block: list[str], s_fn: str, str_key: bytes) -> list[str] | None:
+def _exec_hide(block: list[str], s_fn: str, str_key: bytes,
+                rng: random.Random, used_names: set) -> list[str] | None:
+    """
+    Returns lines that decode and run the block's text
+    without it ever appearing as parseable Python source in the file.
+    """
     dedented = _dedent_block(block)
     text = "\n".join(dedented)
-    if not text.strip() or len(text) > _MAX_HIDE_CHARS:
+    if not text.strip():
+        return None
+    try:
+        minified = minify_source(text)
+        if minified.strip():
+            text = minified
+    except Exception:
+        pass
+    if len(text) > _MAX_HIDE_CHARS:
         return None
     try:
         encoded_expr = _enc_str(text, str_key)
     except Exception:
         return None
-    return [f"exec({s_fn}({encoded_expr}), globals())"]
+
+    decode_call = f"{s_fn}({encoded_expr})"
+    style = rng.randrange(3)
+
+    if style == 0:
+        return [f"exec({decode_call}, globals())"]
+
+    elif style == 1:
+        meta_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
+        cls_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
+        local_used: set = set()
+        p_mcs, p_name, p_bases, p_ns = (random_confusable_name(rng, local_used, 1) for _ in range(4))
+        return [
+            f"class {meta_name}(type):",
+            f"    def __new__({p_mcs}, {p_name}, {p_bases}, {p_ns}):",
+            f"        exec({decode_call}, globals())",
+            f"        return type.__new__({p_mcs}, {p_name}, {p_bases}, {p_ns})",
+            f"class {cls_name}(metaclass={meta_name}):",
+            f"    pass",
+        ]
+
+    else:
+        desc_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
+        cls_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
+        attr_name = random_confusable_name(rng, used_names, length=rng.randint(6, 10))
+        local_used = set()
+        p_self, p_owner, p_ownname = (random_confusable_name(rng, local_used, 1) for _ in range(3))
+        return [
+            f"class {desc_name}:",
+            f"    def __set_name__({p_self}, {p_owner}, {p_ownname}):",
+            f"        exec({decode_call}, globals())",
+            f"class {cls_name}:",
+            f"    {attr_name} = {desc_name}()",
+        ]
+
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +146,7 @@ def _exec_hide(block: list[str], s_fn: str, str_key: bytes) -> list[str] | None:
 # underlying constructs, so a reader (or a script) that's fully solved
 # one still has two more to work out -> they don't share bytecode ops,
 # and two of the three don't even share the "STATE = ..." transition
-# idiom the other relies on:
-
+# idiom the other relies on.
 # ---------------------------------------------------------------------------
 
 _MECHANISMS = ("while_if", "match_case", "try_except", "dict_next")
@@ -146,7 +193,7 @@ def _build_branches(
         content = None
         if (s_fn and str_key and exec_hide_frac > 0 and exec_hide_eligible[i]
                 and rng.random() < exec_hide_frac):
-            hidden = _exec_hide(block, s_fn, str_key)
+            hidden = _exec_hide(block, s_fn, str_key, rng, used_names)
             if hidden is not None:
                 content = [body_indent + line for line in hidden]
         if content is None:
