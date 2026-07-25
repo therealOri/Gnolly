@@ -19,19 +19,33 @@ Mode
                compress the marshaled bytes. The bootstrap decompresses
                + marshal.loads() + exec()s the resulting code object.
 
-
 Algorithm
   Whichever of zlib/bz2/lzma actually produces the smallest output for
   this specific blob -> also measured per build, not assumed.
 
-Both the module names and attribute names involved (zlib/bz2/lzma,
-marshal, base64, decompress/loads/b85decode, "utf-8"/"decode") are
-hidden via strcodec._hidden_import_attr/_hidden_str_expr, the same
-mechanism used everywhere else in the pipeline, nothing about which
-algorithm or mode was chosen is visible as plain text in the output
-either. The compressed blob itself is embedded as base85 text (not a
-raw bytes literal via repr()) -> see pack_source()'s docstring for why
-that specifically matters here.
+Decompression pathway
+  For zlib and bz2 specifically, decompression goes through
+  codecs.decode(data, "zlib") / codecs.decode(data, "bz2") instead of
+  zlib.decompress()/bz2.decompress() directly. Both are registered
+  as standard library codecs. (a route most people reach for exclusively for text
+  encodings and don't think to associate with binary compression.)
+  This means both algorithms share a single hidden lookup (codecs.decode)
+  rather than each needing its own separate hidden module import.
+  Lzma has no codecs registration so it still goes through the traditional
+  lzma.decompress() route when chosen.
+
+One hidden __import__ reference, not several
+  Every lookup needed at runtime (the decompressor, base64.b85decode,
+  and marshal.loads in bytecode mode) shares a single hidden
+  __import__ indirection computed once and stored in a local variable,
+  rather than each one independently reconstructing that whole chain
+  from scratch the way naive repeated strcodec._hidden_import_attr()
+  calls would. Real, measurable bootstrap-size savings, and it's what
+  makes routing zlib/bz2 through one shared codecs.decode lookup
+  actually pay off rather than just moving the cost around.
+
+The bootstrap this module generates is minified before being returned,
+the same as everything else in the pipeline.
 """
 from __future__ import annotations
 import base64
@@ -42,13 +56,16 @@ import random
 import secrets
 import zlib
 
-from .strcodec import _hidden_import_attr, _hidden_str_expr, random_confusable_name
+from .strcodec import _hidden_import_call, _hidden_str_expr, random_confusable_name
+from .minify import minify_source
 
 _ALGOS = {
-    "zlib": (lambda b: zlib.compress(b, 9), "decompress"),
-    "bz2":  (lambda b: bz2.compress(b, 9), "decompress"),
-    "lzma": (lambda b: lzma.compress(b, preset=9), "decompress"),
+    "zlib": lambda b: zlib.compress(b, 9),
+    "bz2":  lambda b: bz2.compress(b, 9),
+    "lzma": lambda b: lzma.compress(b, preset=9),
 }
+
+_CODEC_REGISTERED = {"zlib", "bz2"}
 
 
 def _best_candidate(source: str):
@@ -58,7 +75,7 @@ def _best_candidate(source: str):
     candidates = []
 
     src_bytes = source.encode("utf-8")
-    for algo_name, (compress_fn, _) in _ALGOS.items():
+    for algo_name, compress_fn in _ALGOS.items():
         try:
             c = compress_fn(src_bytes)
             candidates.append((len(c), "source", algo_name, c))
@@ -68,14 +85,14 @@ def _best_candidate(source: str):
     try:
         code = compile(source, "<string>", "exec")
         blob = marshal.dumps(code)
-        for algo_name, (compress_fn, _) in _ALGOS.items():
+        for algo_name, compress_fn in _ALGOS.items():
             try:
                 c = compress_fn(blob)
                 candidates.append((len(c), "bytecode", algo_name, c))
             except Exception:
                 continue
     except Exception:
-        pass  # compile() failing here would be a pre-existing bug elsewhere; degrade gracefully regardless
+        pass
 
     if not candidates:
         return None
@@ -84,13 +101,26 @@ def _best_candidate(source: str):
     return mode, algo_name, compressed
 
 
+def _decompress_reference(algo_name: str, rng: random.Random, imp_var: str) -> str:
+    """Expression for the callable that decompresses this build's
+    chosen algorithm, built against the shared "imp_var" import
+    reference rather than deriving its own."""
+    if algo_name in _CODEC_REGISTERED:
+        codecs_str = _hidden_str_expr("codecs", rng)
+        decode_str = _hidden_str_expr("decode", rng)
+        algo_str = _hidden_str_expr(algo_name, rng)
+        decode_fn = f"getattr({imp_var}({codecs_str}), {decode_str})"
+        return f"(lambda _i: {decode_fn}(_i, {algo_str}))"
+    else:
+        mod_str = _hidden_str_expr(algo_name, rng)
+        attr_str = _hidden_str_expr("decompress", rng)
+        return f"getattr({imp_var}({mod_str}), {attr_str})"
+
+
 def pack_source(source: str) -> str:
     """
     Return a tiny bootstrap + compressed-blob replacement for "source",
-    or leave "source" unchanged if anything goes wrong. This is the very
-    last transformation before the file is shipped, so it has the
-    strictest possible "never break a build" bar of anything in the
-    pipeline.
+    or "source" unchanged if anything goes wrong.
     """
     best = _best_candidate(source)
     if best is None:
@@ -100,15 +130,21 @@ def pack_source(source: str) -> str:
     rng = random.Random(secrets.randbits(64))
     used: set = set()
     blob_var = random_confusable_name(rng, used, length=rng.randint(9, 14))
+    imp_var = random_confusable_name(rng, used, length=rng.randint(9, 14))
 
     b85_text = base64.b85encode(compressed).decode("ascii")
-    b85_decode_call = _hidden_import_attr("base64", "b85decode", rng)
 
-    decompress_call = _hidden_import_attr(algo_name, "decompress", rng)
-    inflated = f"{decompress_call}({b85_decode_call}({blob_var}))"
+    b85mod_str = _hidden_str_expr("base64", rng)
+    b85attr_str = _hidden_str_expr("b85decode", rng)
+    b85_decode_call = f"getattr({imp_var}({b85mod_str}), {b85attr_str})"
+
+    decompress_ref = _decompress_reference(algo_name, rng, imp_var)
+    inflated = f"{decompress_ref}({b85_decode_call}({blob_var}))"
 
     if mode == "bytecode":
-        loads_call = _hidden_import_attr("marshal", "loads", rng)
+        marshal_str = _hidden_str_expr("marshal", rng)
+        loads_str = _hidden_str_expr("loads", rng)
+        loads_call = f"getattr({imp_var}({marshal_str}), {loads_str})"
         payload = f"{loads_call}({inflated})"
     else:
         decode_attr = _hidden_str_expr("decode", rng)
@@ -117,9 +153,16 @@ def pack_source(source: str) -> str:
 
     lines = [
         f"{blob_var} = {b85_text!r}",
+        f"{imp_var} = {_hidden_import_call(rng)}",
         f"exec({payload}, globals())",
     ]
     result = "\n".join(lines)
+
+    # Minify our own generated bootstrap.
+    try:
+        result = minify_source(result)
+    except Exception:
+        pass
 
     if len(result) >= len(source):
         return source
@@ -128,10 +171,14 @@ def pack_source(source: str) -> str:
         restored_compressed = base64.b85decode(b85_text)
         if restored_compressed != compressed:
             return source
-        decompress_fn = {"zlib": zlib.decompress, "bz2": bz2.decompress, "lzma": lzma.decompress}[algo_name]
-        restored = decompress_fn(restored_compressed)
+        if algo_name in _CODEC_REGISTERED:
+            import codecs
+            restored = codecs.decode(restored_compressed, algo_name)
+        else:
+            decompress_fn = {"lzma": lzma.decompress}[algo_name]
+            restored = decompress_fn(restored_compressed)
         if mode == "bytecode":
-            marshal.loads(restored)  # just confirm it unmarshals; exact byte match isn't meaningful for code objects
+            marshal.loads(restored)  # confirm it unmarshals;
         else:
             if restored.decode("utf-8") != source:
                 return source
