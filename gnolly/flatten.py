@@ -111,13 +111,20 @@ def _exec_hide(block: list[str], s_fn: str, str_key: bytes,
     elif style == 1:
         meta_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
         cls_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
+        fn_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
         local_used: set = set()
         p_mcs, p_name, p_bases, p_ns = (random_confusable_name(rng, local_used, 1) for _ in range(4))
+        try:
+            new_enc = _enc_str("__new__", str_key)
+        except Exception:
+            return [f"exec({decode_call}, globals())"]
         return [
             f"class {meta_name}(type):",
-            f"    def __new__({p_mcs}, {p_name}, {p_bases}, {p_ns}):",
-            f"        exec({decode_call}, globals())",
-            f"        return type.__new__({p_mcs}, {p_name}, {p_bases}, {p_ns})",
+            f"    pass",
+            f"def {fn_name}({p_mcs}, {p_name}, {p_bases}, {p_ns}):",
+            f"    exec({decode_call}, globals())",
+            f"    return getattr(type, {s_fn}({new_enc}))({p_mcs}, {p_name}, {p_bases}, {p_ns})",
+            f"setattr({meta_name}, {s_fn}({new_enc}), {fn_name})",
             f"class {cls_name}(metaclass={meta_name}):",
             f"    pass",
         ]
@@ -126,12 +133,19 @@ def _exec_hide(block: list[str], s_fn: str, str_key: bytes,
         desc_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
         cls_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
         attr_name = random_confusable_name(rng, used_names, length=rng.randint(6, 10))
+        fn_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
         local_used = set()
         p_self, p_owner, p_ownname = (random_confusable_name(rng, local_used, 1) for _ in range(3))
+        try:
+            set_name_enc = _enc_str("__set_name__", str_key)
+        except Exception:
+            return [f"exec({decode_call}, globals())"]
         return [
             f"class {desc_name}:",
-            f"    def __set_name__({p_self}, {p_owner}, {p_ownname}):",
-            f"        exec({decode_call}, globals())",
+            f"    pass",
+            f"def {fn_name}({p_self}, {p_owner}, {p_ownname}):",
+            f"    exec({decode_call}, globals())",
+            f"setattr({desc_name}, {s_fn}({set_name_enc}), {fn_name})",
             f"class {cls_name}:",
             f"    {attr_name} = {desc_name}()",
         ]
