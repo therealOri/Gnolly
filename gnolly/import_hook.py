@@ -155,7 +155,12 @@ def generate_import_hook_lines(
     # ── search location 3: gnolly package dir via sys.modules ────────────────
     a(f"    if {v_so} is " + sing("None") + ":")
     a(f"        if {enc('gnolly')} in getattr({v_sysmod}, {enc('modules')}):")
-    a(f"            {v_cand} = {v_path}(getattr(getattr({v_sysmod}, {enc('modules')})[{enc('gnolly')}], {enc('__file__')}, '')) / '..' / {v_soname}")
+    # gnolly.__file__ points at __init__.py (a *file*), so the parent dir
+    # is what we want -> use .parent (same as location 1), not '/ ..',
+    # which lexically appends '..' onto a file path and always fails
+    # .exists() because the OS won't treat a file as a directory to
+    # traverse out of.
+    a(f"            {v_cand} = getattr({v_path}(getattr(getattr({v_sysmod}, {enc('modules')})[{enc('gnolly')}], {enc('__file__')}, '')), {enc('parent')}) / {v_soname}")
     a(f"            if {em(v_cand, 'exists')}: {v_so} = {v_cand}")
 
     # ── search location 4: scan sys.path for gnolly/ subdir ──────────────────
