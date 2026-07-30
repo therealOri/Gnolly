@@ -1,5 +1,5 @@
 """
-setup.py - Gnolly package build
+setup.py -> Gnolly package build
 
 Builds both Cython extensions:
   gnolly._gnolly_core   - AES-GCM decrypt + anti-debug runtime
@@ -82,6 +82,12 @@ setup(
         "Cython>=3.2.5",
         "setuptools>=82.0.1",
     ],
+    extras_require={
+        "dev": [
+            "pytest>=7.0",
+            "pytest-xdist>=3.0",  # `pytest -n auto` for parallel test runs
+        ],
+    },
     entry_points={
         "console_scripts": [
             "gnolly=gnolly.cli:main",
