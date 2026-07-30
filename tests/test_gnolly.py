@@ -1,8 +1,6 @@
 """
 Gnolly test suite.
 Run with: python -m pytest tests/ -v
-NOTE: Requires both compiled core and vm .so files to be in /gnolly with the .pyx files.
-TODO: Fix so it can check for if they exist in the site-packages dir for the py environment.
 """
 import os
 import sys
@@ -10,7 +8,69 @@ import hashlib
 import random
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+try:
+    import gnolly  # noqa: F401 -> prefer whatever's already importable
+    # (e.g. `pip install .` into the active environment) so the suite
+    # exercises the same .so resolution path real installs use. Only
+    # fall back to the local checkout if gnolly isn't installed at all.
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+# ── Shared, expensive fixtures ────────────────────────────────────────────────
+
+@pytest.fixture(scope="module")
+def trivial_protected_stub():
+    """One default-settings protect() build of a trivial script, shared by
+    every test that only inspects the stub's *text* (identifier/hash/
+    pattern checks) or just needs some protected script to execute
+    without caring what it contains."""
+    from gnolly.pipeline import protect
+    from gnolly.keymanager import generate_key, key_to_hex
+    key = generate_key()
+    stub = protect("x = 1", key)
+    return {"stub": stub, "key_hex": key_to_hex(key)}
+
+
+@pytest.fixture(scope="module")
+def sample_protected_run():
+    """One default-settings protect() build of examples/sample.py,
+    executed once and cached, shared by every test that just wants to
+    confirm the default pipeline runs the sample script correctly."""
+    import io, contextlib
+    from gnolly.pipeline import protect
+    from gnolly.keymanager import generate_key, key_to_hex
+    src = open(os.path.join(os.path.dirname(__file__), "..", "examples", "sample.py")).read()
+    key = generate_key()
+    stub = protect(src, key)
+    os.environ["GNOLLY_KEY"] = key_to_hex(key)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        exec(compile(stub, "sample.gnolly.py", "exec"), {"__builtins__": __builtins__})
+    return {"stub": stub, "key_hex": key_to_hex(key), "output": buf.getvalue()}
+
+
+@pytest.fixture(scope="module")
+def antidebug_stub():
+    """One default-settings protect() build shared by every anti-debug
+    test that triggers or checks the SAME protected script under
+    different trace/profile/sys.modules conditions."""
+    from gnolly.pipeline import protect
+    from gnolly.keymanager import generate_key, key_to_hex
+    key = generate_key()
+    stub = protect("print('antidebug ok')", key)
+    return {"stub": stub, "key_hex": key_to_hex(key)}
+
+
+@pytest.fixture(scope="module")
+def antidebug_unpacked_stub():
+    """Separate from antidebug_stub because this one specifically needs
+    pack=False to inspect the readable (pre-bootstrap) stub's line
+    count."""
+    from gnolly.pipeline import protect
+    from gnolly.keymanager import generate_key
+    return protect("print('x')", generate_key(), pack=False)
+
 
 # ── Encoding ──────────────────────────────────────────────────────────────────
 
@@ -104,7 +164,7 @@ class TestCrypto:
         from gnolly.crypto import encrypt
         data = b"same plaintext"
         key = b"same-key"
-        # Each encryption uses a fresh random salt+IV → unique output
+        # Each encryption uses a fresh random salt+IV -> unique output
         assert encrypt(data, key) != encrypt(data, key)
 
     def test_large_payload(self):
@@ -196,18 +256,10 @@ print(greet(name="Gnolly", greeting="Hi"))
 # ── Full Pipeline ─────────────────────────────────────────────────────────────
 
 class TestPipeline:
-    def _protect_and_run(self, source: str) -> dict:
-        from gnolly.pipeline import protect
-        from gnolly.keymanager import generate_key, key_to_hex
-        key = generate_key()
-        stub = protect(source, key)
-        os.environ["GNOLLY_KEY"] = key_to_hex(key)
-        g = {"__builtins__": __builtins__}
-        exec(compile(stub, "protected.gnolly.py", "exec"), g)
-        return g
-
-    def test_simple(self):
-        self._protect_and_run("result = 1 + 1")
+    def test_simple(self, trivial_protected_stub):
+        os.environ["GNOLLY_KEY"] = trivial_protected_stub["key_hex"]
+        exec(compile(trivial_protected_stub["stub"], "protected.gnolly.py", "exec"),
+             {"__builtins__": __builtins__})
 
     def test_output_correct(self):
         import io, contextlib
@@ -233,24 +285,16 @@ class TestPipeline:
         with pytest.raises(SystemExit):
             exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
 
-    def test_full_sample(self):
-        import io, contextlib
-        from gnolly.pipeline import protect
-        from gnolly.keymanager import generate_key, key_to_hex
-        src = open(os.path.join(os.path.dirname(__file__), "..", "examples", "sample.py")).read()
-        key = generate_key()
-        stub = protect(src, key)
-        os.environ["GNOLLY_KEY"] = key_to_hex(key)
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            exec(compile(stub, "sample.gnolly.py", "exec"), {"__builtins__": __builtins__})
-        out = buf.getvalue()
+    def test_full_sample(self, sample_protected_run):
+        out = sample_protected_run["output"]
         assert "Hello from a protected script!" in out
         assert "fibonacci(10) = 55" in out
         assert "Hello, World! The answer is 42." in out
 
     def test_repeated_calls_produce_different_stubs(self):
-        """No seed exists anymore -- every protect() call must still be unique."""
+        """No seed exists anymore -> every protect() call must still be
+        unique. This inherently needs two independent builds, so it
+        can't use a shared fixture."""
         from gnolly.pipeline import protect
         from gnolly.keymanager import generate_key
         src = "x = 1"
@@ -268,17 +312,12 @@ class TestPipeline:
         assert "SECRET_TOKEN" not in stub
         assert "xK9mP2qR7vL4nW1j" not in stub
 
-    def test_no_exec_string_in_stub(self):
+    def test_no_exec_string_in_stub(self, trivial_protected_stub):
         """The stub must not exec() a string, but only a code object."""
-        from gnolly.pipeline import protect
-        from gnolly.keymanager import generate_key
-        src = "x = 1"
-        key = generate_key()
-        stub = protect(src, key)
+        stub = trivial_protected_stub["stub"]
         # exec() should only appear followed by a variable name (code object),
         # never by a string literal or decode() call
         import re
-        # Find all exec( calls
         exec_calls = re.findall(r'exec\(([^)]{1,60})', stub)
         for call in exec_calls:
             assert "decode" not in call, f"exec() on string found: exec({call})"
@@ -317,26 +356,11 @@ class TestKeyManager:
         assert key_from_env() is None
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
-
 # ── Full Pipeline (VM mode, always on) ───────────────────────────────────────
 
 class TestPipelineWithShuffle:
-    def test_protect_and_run_with_shuffle(self):
-        import io, contextlib
-        from gnolly.pipeline import protect
-        from gnolly.keymanager import generate_key, key_to_hex
-        src = open(os.path.join(os.path.dirname(__file__), "..", "examples", "sample.py")).read()
-        key = generate_key()
-        stub = protect(src, key)
-        os.environ["GNOLLY_KEY"] = key_to_hex(key)
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            exec(compile(stub, "p.gnolly.py", "exec"), {"__builtins__": __builtins__})
-        out = buf.getvalue()
+    def test_protect_and_run_with_shuffle(self, sample_protected_run):
+        out = sample_protected_run["output"]
         assert "fibonacci(10) = 55" in out
         assert "Hello from a protected script!" in out
 
@@ -423,81 +447,68 @@ class TestPackageProtection:
 # ── Anti-Debug ────────────────────────────────────────────────────────────────
 
 class TestAntiDebug:
-    def _make_stub(self, src="print('x')"):
-        from gnolly.pipeline import protect
-        from gnolly.keymanager import generate_key, key_to_hex
-        key = generate_key()
-        stub = protect(src, key)
-        os.environ["GNOLLY_KEY"] = key_to_hex(key)
-        return stub
-
-    def test_trace_hook_triggers_exit(self):
+    def test_trace_hook_triggers_exit(self, antidebug_stub):
         """sys.settrace active (debugger attached) -> SystemExit."""
-        stub = self._make_stub()
+        os.environ["GNOLLY_KEY"] = antidebug_stub["key_hex"]
         import sys as _sys
         _sys.settrace(lambda *a: None)
         try:
             with pytest.raises(SystemExit):
-                exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
+                exec(compile(antidebug_stub["stub"], "p.py", "exec"), {"__builtins__": __builtins__})
         finally:
             _sys.settrace(None)
 
-    def test_profile_hook_triggers_exit(self):
+    def test_profile_hook_triggers_exit(self, antidebug_stub):
         """sys.setprofile active (profiler attached) -> SystemExit."""
-        stub = self._make_stub()
+        os.environ["GNOLLY_KEY"] = antidebug_stub["key_hex"]
         import sys as _sys
         _sys.setprofile(lambda *a: None)
         try:
             with pytest.raises(SystemExit):
-                exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
+                exec(compile(antidebug_stub["stub"], "p.py", "exec"), {"__builtins__": __builtins__})
         finally:
             _sys.setprofile(None)
 
-    def test_pydevd_in_modules_triggers_exit(self):
+    def test_pydevd_in_modules_triggers_exit(self, antidebug_stub):
         """pydevd in sys.modules (PyCharm debugger) -> SystemExit."""
         import types, sys as _sys
+        os.environ["GNOLLY_KEY"] = antidebug_stub["key_hex"]
         _sys.modules['pydevd'] = types.ModuleType('pydevd')
-        stub = self._make_stub()
         try:
             with pytest.raises(SystemExit):
-                exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
+                exec(compile(antidebug_stub["stub"], "p.py", "exec"), {"__builtins__": __builtins__})
         finally:
             del _sys.modules['pydevd']
 
-    def test_debugpy_in_modules_triggers_exit(self):
+    def test_debugpy_in_modules_triggers_exit(self, antidebug_stub):
         """debugpy in sys.modules (VS Code debugger) -> SystemExit."""
         import types, sys as _sys
+        os.environ["GNOLLY_KEY"] = antidebug_stub["key_hex"]
         _sys.modules['debugpy'] = types.ModuleType('debugpy')
-        stub = self._make_stub()
         try:
             with pytest.raises(SystemExit):
-                exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
+                exec(compile(antidebug_stub["stub"], "p.py", "exec"), {"__builtins__": __builtins__})
         finally:
             del _sys.modules['debugpy']
 
-    def test_normal_execution_unaffected(self):
-        """No debugger active → runs normally."""
+    def test_normal_execution_unaffected(self, antidebug_stub):
+        """No debugger active -> runs normally."""
         import io, contextlib
-        src = "print('antidebug ok')"
-        stub = self._make_stub(src)
+        os.environ["GNOLLY_KEY"] = antidebug_stub["key_hex"]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
+            exec(compile(antidebug_stub["stub"], "p.py", "exec"), {"__builtins__": __builtins__})
         assert buf.getvalue().strip() == "antidebug ok"
 
-    def test_antidebug_lines_in_stub(self):
-        """Anti-debug checks are present as obfuscated lines in the stub."""
-        from gnolly.pipeline import protect
-        from gnolly.keymanager import generate_key
-        stub = protect("print('x')", generate_key(), pack=False)
-        # The stub should contain settrace and gettrace references (encoded)
-        # We can't check by name since they're encoded, but we can verify
-        # the stub has significantly more lines than a stub without antidebug
-        assert len(stub.splitlines()) > 100
+    def test_antidebug_lines_in_stub(self, antidebug_unpacked_stub):
+        """Anti-debug checks are present as obfuscated lines in the stub.
+        We can't check by name since they're encoded, but we can verify
+        the stub has significantly more lines than a stub without antidebug."""
+        assert len(antidebug_unpacked_stub.splitlines()) > 100
 
-    def test_no_plain_debug_strings(self):
+    def test_no_plain_debug_strings(self, antidebug_stub):
         """Debug module names don't appear in plaintext in the stub."""
-        stub = self._make_stub()
+        stub = antidebug_stub["stub"]
         for name in ['pydevd', 'debugpy', 'gettrace', 'settrace', 'getprofile']:
             assert name not in stub, f"'{name}' visible in stub"
 
@@ -560,16 +571,14 @@ class TestMachineBinding:
         with pytest.raises(SystemExit):
             exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
 
-    def test_no_gnolly_identifiers_in_stub(self):
+    def test_no_gnolly_identifiers_in_stub(self, trivial_protected_stub):
         """No Gnolly-specific identifiers visible in stub output."""
-        from gnolly.pipeline import protect
-        from gnolly.keymanager import generate_key
-        stub = protect("x = 1", generate_key())
+        stub = trivial_protected_stub["stub"]
         for ident in ['gnolly', '_gnolly_core', 'gnolly_run']:
             assert ident not in stub, f"'{ident}' found in stub"
 
     def test_fingerprint_hex_roundtrip(self):
-        """fingerprint_hex() → fingerprint_from_hex() roundtrips correctly."""
+        """fingerprint_hex() -> fingerprint_from_hex() roundtrips correctly."""
         from gnolly.binding import collect_fingerprint, fingerprint_hex, fingerprint_from_hex
         fp = collect_fingerprint()
         if fp is None:
@@ -581,38 +590,28 @@ class TestMachineBinding:
 # ── Import Hook ───────────────────────────────────────────────────────────────
 
 class TestImportHook:
-    def test_no_gnolly_in_stub(self):
+    def test_no_gnolly_in_stub(self, trivial_protected_stub):
         """Import hook hides all Gnolly identifiers from stub."""
-        from gnolly.pipeline import protect
-        from gnolly.keymanager import generate_key
-        stub = protect("x=1", generate_key())
+        stub = trivial_protected_stub["stub"]
         for ident in ['gnolly', '_gnolly_core', 'gnolly_run', 'spec_from_file']:
             assert ident not in stub, f"'{ident}' found in stub"
 
-    def test_so_hash_embedded(self):
+    def test_so_hash_embedded(self, trivial_protected_stub):
         """The .so hash is verified against by the stub, but obfuscated --
         not embedded as a bare, grep-able plaintext literal."""
-        from gnolly.pipeline import protect
-        from gnolly.keymanager import generate_key
         from gnolly.import_hook import get_core_so_hash
         so_hash = get_core_so_hash()
         if so_hash is None:
             pytest.skip("No compiled .so")
-        stub = protect("x=1", generate_key())
-        assert so_hash not in stub, \
+        assert so_hash not in trivial_protected_stub["stub"], \
             ".so hash must not appear as a plaintext literal in the stub"
 
-    def test_stub_runs_with_hook(self):
+    def test_stub_runs_with_hook(self, sample_protected_run):
         """Protected file runs correctly using the import hook path."""
-        import io, contextlib
-        from gnolly.pipeline import protect
-        from gnolly.keymanager import generate_key, key_to_hex
-        src = open(os.path.join(os.path.dirname(__file__), "..", "examples", "sample.py")).read()
-        key = generate_key()
-        stub = protect(src, key)
-        os.environ["GNOLLY_KEY"] = key_to_hex(key)
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            exec(compile(stub, "hook.gnolly.py", "exec"), {"__builtins__": __builtins__})
-        assert "fibonacci(10) = 55" in buf.getvalue()
-        assert "Hello from a protected script!" in buf.getvalue()
+        out = sample_protected_run["output"]
+        assert "fibonacci(10) = 55" in out
+        assert "Hello from a protected script!" in out
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
