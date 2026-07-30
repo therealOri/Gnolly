@@ -182,6 +182,34 @@ def _tokenize_minify_fragment(fragment: str) -> str:
     return "".join(parts)
 
 
+def _non_string_length(s: str) -> int:
+    """Length of "s" with the *contents* of every string literal
+    collapsed down to just their quote characters."""
+    n = len(s)
+    i = 0
+    count = 0
+    in_str = None
+    while i < n:
+        c = s[i]
+        if in_str:
+            if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == in_str:
+                in_str = None
+                count += 1
+            i += 1
+            continue
+        if c in ("\"", "'"):
+            in_str = c
+            count += 1
+            i += 1
+            continue
+        count += 1
+        i += 1
+    return count
+
+
 def _minify_long_line(stripped: str) -> str:
     """
     Minify a single (already left-stripped) physical line too long to
@@ -190,6 +218,8 @@ def _minify_long_line(stripped: str) -> str:
     """
     comma_depths = _scan_out_of_string_commas(stripped)
     if not comma_depths:
+        if _non_string_length(stripped) <= _MAX_TOKENIZE_LEN:
+            return _tokenize_minify_fragment(stripped)
         return stripped
 
     target_depth = min(d for _, d in comma_depths)
