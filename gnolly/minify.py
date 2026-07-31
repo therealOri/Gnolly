@@ -61,6 +61,7 @@ def _logical_lines(src: str) -> list[str]:
 
 
 _MAX_TOKENIZE_LEN = 20000
+_MAX_COMMAS_INLINE = 40
 
 
 def _scan_out_of_string_commas(s: str) -> list[tuple[int, int]]:
@@ -255,6 +256,8 @@ def _render_physical_line(line: str) -> tuple[int, str]:
     stripped = line.lstrip(" ")
     indent_level = (len(line) - len(stripped)) // 4
     if len(stripped) > _MAX_TOKENIZE_LEN:
+        return indent_level, _minify_long_line(stripped)
+    if len(_scan_out_of_string_commas(stripped)) > _MAX_COMMAS_INLINE:
         return indent_level, _minify_long_line(stripped)
     try:
         toks = [
