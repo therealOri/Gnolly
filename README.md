@@ -343,7 +343,7 @@ This composes with the `.so` integrity binding described [above](#versioning-the
 | Anti-debug (Python layer) | Trace/profile hooks, known debugger modules, and timing gates checked before any crypto work |
 | Anti-debug (C layer) | A second independent sweep runs inside the compiled `.so` after the stub's checks |
 | Slow-execution debugger detection | Two independent bounded-loop timing checks flag single-stepping/heavy tracing overhead (complements the existing too-fast/replay timing gate); see `gnolly/antidebug.py` |
-| Stub self-hash | The shipped stub verifies its own exact source text against an embedded digest via several independently-placed, differently-shaped checks at startup -> reformatting, patching, or beautifying the file for easier reading breaks it. See `gnolly/selfhash.py`. Toggle via `self_hash=False` (default on); disable alongside `pack=False` if you need to inspect the readable stub source. |
+| Stub self-hash | The shipped stub verifies its own exact source text against an embedded digest via several independently-placed, differently-shaped checks at startup -> reformatting, patching, or beautifying the file for easier reading breaks it. See `gnolly/selfhash.py`. Always on when protecting via the CLI. Library callers can pass `self_hash=False` to `gnolly.pipeline.protect()` (e.g. alongside `pack=False`) if they need to inspect the readable stub source. |
 
 ### What Gnolly does NOT do
 
