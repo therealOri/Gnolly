@@ -114,7 +114,6 @@ def generate_stub(
     tag: bytes,
     blob_header_skip: int,
     use_vm: bool = True,
-    shuffle_opcodes: bool = True,   # kept for API compat; ignored when use_vm=True
     bound: bool = False,
     silent: bool = True,
     flatten: bool = True,
@@ -133,7 +132,7 @@ def generate_stub(
     h_sys    = N[2];  h_marshal = N[3];  h_hash   = N[4]
     h_zlib   = N[5];  h_lzma    = N[6];  h_bz2    = N[7]
     h_blt    = N[131]  # builtins module handle -> used to obfuscate None/True/False
-    h_os     = N[8];  h_aes_cls = N[9];  h_struct = N[10]
+    h_os     = N[8];  h_aes_cls = N[9]
 
     # State machine vars
     sm_state   = N[11]; sm_data  = N[12]; sm_key   = N[13]
@@ -145,8 +144,6 @@ def generate_stub(
     chunk_vars = N[30:42]
 
     # XOR/decode helper names
-    xor_fn    = N[42]; alpha_var = N[43]; rev_var  = N[44]
-    decode_fn = N[45]; unshuffle_fn = N[46]
     hx_fn    = N[47]; imp_fn = N[49]
 
     # Loop/temp vars
@@ -211,7 +208,6 @@ def generate_stub(
     a(_obf_import("lzma",    h_lzma,   s_fn, str_key, imp_fn))
     a(_obf_import("bz2",     h_bz2,    s_fn, str_key, imp_fn))
     a(_obf_import("os",      h_os,     s_fn, str_key, imp_fn))
-    a(_obf_import("struct",  h_struct, s_fn, str_key, imp_fn))
     a(_obf_from_import("Crypto.Cipher", "AES", h_aes_cls, s_fn, str_key, imp_fn))
     a(_junk_assign(N[24]))
     a("")
@@ -236,36 +232,6 @@ def generate_stub(
         alpha, xor_key, s_fn, imp_fn, str_key, obn, rng)
     for _mhl in _mh_lines:
         a(_mhl)
-    a("")
-
-    # ── Opcode unshuffle ──────────────────────────────────────────────────────
-    a(f"def {unshuffle_fn}({v[11]}, {v[12]}, {v[13]}):")
-    a(f"    if not {v[12]} or not {v[13]}: return {v[11]}")
-    a(f"    try:")
-    a(f"        {v[14]} = {imp_fn}({s_fn}({_enc_str('opcode', str_key)}))")
-    a(f"        {v[15]} = getattr({v[14]}, {s_fn}({_enc_str('_inline_cache_entries', str_key)}))")
-    a(f"        {v[16]} = " + sing("True"))
-    a(f"    except Exception: {v[15]} = []; {v[16]} = " + sing("False"))
-    _oc_used: set = set()
-    oc1 = random_confusable_name(rng, _oc_used, 1)
-    a(f"    {v[17]} = {{{oc1}: {v[12]}[{oc1}] for {oc1} in range({obn(256)})}}")
-    a(f"    {v[18]} = []")
-    a(f"    for {v[19]} in range(0, len({v[13]}), {obn(8)}):")
-    a("        " + v[20] + ", " + v[21] + " = " + em(h_struct, "unpack_from", s_fn + "(" + str(_enc_str(chr(62)+chr(73)+chr(73), str_key)) + ")", v[13], v[19]))
-    a(f"        getattr({v[18]}, {s_fn}({_enc_str(chr(97)+chr(112)+chr(112)+chr(101)+chr(110)+chr(100), str_key)}))(({v[20]}, {v[21]}))")
-    a(f"    {v[22]} = bytearray({v[11]})")
-    a(f"    for ({v[23]}, {v[24]}) in {v[18]}:")
-    a(f"        {v[25]} = 0")
-    a(f"        while {v[25]} < {v[24]}:")
-    a(f"            {v[26]} = {v[22]}[{v[23]} + {v[25]}]")
-    a(f"            {v[27]} = {v[17]}.get({v[26]}, {v[26]})")
-    a(f"            {v[22]}[{v[23]} + {v[25]}] = {v[27]}")
-    a(f"            {v[25]} += {obn(2)}")
-    # Cache-safe: .get() works for dict (3.14+); fallback for list (3.11-3.13)
-    a(f"            if {v[16]}:")
-    a(f"                try: {v[25]} += {v[15]}.get({v[27]}, 0) * {obn(2)}")
-    a(f"                except AttributeError: {v[25]} += ({v[15]}[{v[27]}] if {v[27]} < len({v[15]}) else 0) * {obn(2)}")
-    a(f"    return bytes({v[22]})")
     a("")
 
     # ── State machine ─────────────────────────────────────────────────────────
