@@ -65,11 +65,12 @@ def antidebug_stub():
 @pytest.fixture(scope="module")
 def antidebug_unpacked_stub():
     """Separate from antidebug_stub because this one specifically needs
-    pack=False to inspect the readable (pre-bootstrap) stub's line
-    count."""
+    pack=False (and self_hash=False, which also collapses the stub to a
+    single assignment+exec line by design -> see gnolly.selfhash) to
+    inspect the readable (pre-bootstrap) stub's line count."""
     from gnolly.pipeline import protect
     from gnolly.keymanager import generate_key
-    return protect("print('x')", generate_key(), pack=False)
+    return protect("print('x')", generate_key(), pack=False, self_hash=False)
 
 
 # ── Encoding ──────────────────────────────────────────────────────────────────
