@@ -22,11 +22,13 @@ import hashlib
 import random
 import secrets
 import struct
-from .antidebug import generate_antidebug_lines, generate_timing_check_lines
+from .antidebug import generate_antidebug_lines, generate_timing_check_lines, generate_slow_timing_check_lines
 from .binding_stub import generate_binding_lines
 from .import_hook  import generate_import_hook_lines, get_core_so_hash, get_vm_so_hash
 from .namegen import random_confusable_name
 from .flatten import flatten_source
+from .selfhash import wrap_with_self_hash
+from .modhide import generate_hidden_decode_import
 from .strcodec import (
     _obf_int_lambda, _split_int_list_expr,
     _enc_str, _enc_bytes_as_str,
@@ -116,9 +118,10 @@ def generate_stub(
     bound: bool = False,
     silent: bool = True,
     flatten: bool = True,
+    self_hash: bool = True,
 ) -> str:
     rng = random.SystemRandom()
-    N   = _gen_names(150)
+    N   = _gen_names(160)
 
     # String encoding key (different from payload xor_key)
     str_key  = _make_str_key()
@@ -223,32 +226,16 @@ def generate_stub(
         a(f"{cvar} = " + sing("None"))
     a("")
 
-    # ── XOR spread (inline lambda) ────────────────────────────────────────────
-    xor_key_enc = _enc_bytes_as_str(xor_key, byt_key)
-    a(f"{xor_fn} = lambda {v[0]}, {v[1]}: bytes("
-      f"{v[2]} ^ {v[1]}[{v[3]} % len({v[1]})] "
-      f"for {v[3]}, {v[2]} in enumerate({v[0]}))")
-    a("")
-
-    # ── Custom alphabet decoder ───────────────────────────────────────────────
-    # Rewritten as a nested comprehension (decode groups -> flatten to bytes)
-    # instead of a step-by-step for-loop with three separate .append() calls.
-    alpha_enc = _enc_str(alpha, str_key)
-    a(f"{alpha_var} = {s_fn}({alpha_enc})")
-    _dc_used: set = set()
-    rc1, rc2 = (random_confusable_name(rng, _dc_used, 1) for _ in range(2))
-    a(f"{rev_var} = {{{rc1}: {rc2} for {rc2}, {rc1} in enumerate({alpha_var})}}")
-    cp, ct, cn, cb, ci, cx, cy = (random_confusable_name(rng, _dc_used, 1) for _ in range(7))
-    a(f"def {decode_fn}({v[4]}):")
-    a(f"    {cp} = " + em(v[4], "count", "chr(61)"))
-    a(f"    {ct} = " + em(v[4], "replace", "chr(61)", alpha_var + "[0]"))
-    a(f"    {cn} = [({rev_var}[{ct}[{ci}]] << {obn(18)} | {rev_var}[{ct}[{ci}+1]] << {obn(12)}"
-      f" | {rev_var}[{ct}[{ci}+2]] << {obn(6)} | {rev_var}[{ct}[{ci}+3]])"
-      f" for {ci} in range(0, len({ct}), {obn(4)})]")
-    a(f"    {cb} = bytes({cx} for {cy} in {cn} for {cx} in"
-      f" (({cy} >> {obn(16)}) & {obn(255)}, ({cy} >> {obn(8)}) & {obn(255)}, {cy} & {obn(255)}))")
-    a(f"    {v[10]} = {cb}[:-{cp}] if {cp} else {cb}")
-    a(f"    return {xor_fn}({v[10]}, {b_fn}({xor_key_enc}))")
+    # ── Custom alphabet decoder (behind a synthetic sys.meta_path import) ─────
+    # See gnolly.modhide: unlike the old inline "def decode_fn(...)" this
+    # used to be, the decoder's actual logic never appears as source
+    # text anywhere in this file -> it's synthesized into a real module
+    # object the first time imp_fn(<fake name>) runs, indistinguishable
+    # at the call site from any other obfuscated import here.
+    _mh_lines, decode_ref = generate_hidden_decode_import(
+        alpha, xor_key, s_fn, imp_fn, str_key, obn, rng)
+    for _mhl in _mh_lines:
+        a(_mhl)
     a("")
 
     # ── Opcode unshuffle ──────────────────────────────────────────────────────
@@ -338,8 +325,20 @@ def generate_stub(
         a(_adl)
     a("")
 
+    # ── REDUNDANT CHECK: slow-execution debugger detection (instance 1/2) ────
+    # Complements the fast-timing gate above -> that one catches replay/
+    # mocking (too fast); this catches single-stepping/heavy tracing (too
+    # slow). Deliberately independent of every other check here: it needs
+    # nothing from them and nothing after it needs it, so removing any one
+    # check doesn't disable this one or vice versa.
+    for _stl in generate_slow_timing_check_lines(
+            s_fn=s_fn, h_sys=h_sys, exit_enc=exit_enc, str_key=str_key,
+            obn=obn, imp_fn=imp_fn):
+        a(_stl)
+    a("")
+
     # ── INLINE STATE 0: decode blob ───────────────────────────────────────────
-    a(f"{sm_data} = {decode_fn}({sm_blob})")
+    a(f"{sm_data} = ({decode_ref})({sm_blob})")
     a(f"{sm_blob} = " + sing("None"))
     a("")
 
@@ -352,6 +351,15 @@ def generate_stub(
     a(v[28] + " = " + em(v[28], "hexdigest"))
     a(f"if {v[28]} != {s_fn}({_enc_str(hash_hex, str_key)}):")
     a(f"    getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})")
+    a("")
+
+    # ── REDUNDANT CHECK: slow-execution debugger detection (instance 2/2) ────
+    # Same mechanism as the earlier instance, placed well away from it
+    # structurally -> patching the first doesn't remove this one.
+    for _stl2 in generate_slow_timing_check_lines(
+            s_fn=s_fn, h_sys=h_sys, exit_enc=exit_enc, str_key=str_key,
+            obn=obn, imp_fn=imp_fn):
+        a(_stl2)
     a("")
 
     # ── INLINE STATE 2: get key ───────────────────────────────────────────────
@@ -452,4 +460,14 @@ def generate_stub(
     result = "\n".join(final)
     if flatten:
         result = flatten_source(result, s_fn=s_fn, str_key=str_key)
+
+    # ── SELF-HASH: verify our own source text hasn't been reformatted/
+    # patched, and checked redundantly. This intentionally wraps whatever flatten produced
+    # (or the unflattened result, if flatten=False) as the very last step,
+    # so "our own source text" means exactly what pipeline.py's later
+    # minify/pack stages will ship -> minify only touches whitespace
+    # outside string literals, so the digest computed here stays valid
+    # all the way through.
+    if self_hash:
+        result = wrap_with_self_hash(result, src_var=N[150])
     return result
