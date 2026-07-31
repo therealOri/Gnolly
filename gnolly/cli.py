@@ -83,6 +83,7 @@ def cmd_protect(args):
         flatten             = not args.no_flatten,
         minify              = not args.no_minify,
         pack                = not args.no_pack,
+        self_hash           = not args.no_self_hash,
     )
     print(f"\n[gnolly] Done -> {out}")
     print(f"[gnolly] Runtime:")
@@ -128,6 +129,7 @@ def cmd_protect_package(args):
         flatten             = not args.no_flatten,
         minify              = not args.no_minify,
         pack                = not args.no_pack,
+        self_hash           = not args.no_self_hash,
     )
     print(f"\n[gnolly] Runtime:")
     print(f"           export GNOLLY_KEY={key_to_hex(key)}")
@@ -149,6 +151,8 @@ def _add_obf_flags(p):
                    help="Disable minification of the protected output (on by default)")
     p.add_argument("--no-pack", action="store_true",
                    help="Disable final compression pass (bootstrap + compressed blob, on by default)")
+    p.add_argument("--no-self-hash", action="store_true",
+                   help="Disable self-hash verification of the stub's own source text (on by default)")
     p.add_argument("--bind",       action="store_true",
                    help="Bind output to THIS machine (uses current machine fingerprint)")
     p.add_argument("--bind-fp",    default=None, dest="bind_fp",
