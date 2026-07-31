@@ -72,6 +72,7 @@ def protect(
     flatten: bool = True,
     minify: bool = True,
     pack: bool = True,
+    self_hash: bool = True,
 ) -> str:
     """
     Parameters
@@ -101,6 +102,18 @@ def protect(
                       On by default; disable via --no-pack on the CLI
                       if you want the readable (flattened/minified)
                       stub as the shipped output instead.
+    self_hash       : toggle self-hash verification of the stub's own
+                      source text (see gnolly.selfhash). Several
+                      independent checks, run at startup, detect any
+                      reformatting/patching of the shipped file. On by
+                      default. Collapses the stub's visible line count
+                      down to essentially one line (an assignment plus
+                      exec()), since the checked text has to be
+                      self-referenced as a string rather than left as
+                      literal top-level statements -> disable if you
+                      specifically need to inspect the readable
+                      (flattened/minified) stub source, e.g. with
+                      pack=False.
     """
     def _log(msg: str) -> None:
         if verbose:
@@ -189,6 +202,7 @@ def protect(
         bound           = (machine_fingerprint is not None),
         silent          = silent,
         flatten         = flatten,
+        self_hash       = self_hash,
     )
     if minify:
         _log("Minifying stub …")
