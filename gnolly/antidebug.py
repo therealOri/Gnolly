@@ -176,3 +176,52 @@ def generate_timing_check_lines(
 
 
     return lines
+
+
+def generate_slow_timing_check_lines(
+    s_fn: str,
+    h_sys: str,
+    exit_enc,
+    str_key: bytes,
+    obn,
+    imp_fn: str = "__import__",
+    iterations: int = 60_000,
+    max_seconds: float = 0.35,
+) -> list[str]:
+    """
+    Complement to the existing timing gate (which only catches KDF running
+    suspiciously FAST -> mocked/replayed). This one catches the opposite:
+    a bounded, cheap computation taking suspiciously LONG to run.
+
+    "iterations"/"max_seconds" are deliberately generous (large margin
+    over normal execution time) to avoid false positives on slow or
+    heavily loaded legitimate machines; tune down only if you've measured
+    your own worst-case legitimate execution time first.
+
+    Self-contained: unlike generate_timing_check_lines, this does not
+    need a matching "start" call elsewhere -> start and end both happen
+    here, so multiple independent instances can be dropped in anywhere
+    in the stub without coordinating shared state.
+    """
+    lines = []
+    a = lines.append
+
+    def enc(s: str) -> str:
+        return _enc_str(s, str_key)
+
+    def s(text: str) -> str:
+        return f"{s_fn}({enc(text)})"
+
+    exit_call = f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
+    rng = random.Random(secrets.randbits(64))
+    used: set = set()
+    vt0, vt1, vi, vacc = (random_confusable_name(rng, used, length=rng.randint(6, 11)) for _ in range(4))
+
+    a(f"{vt0} = getattr({imp_fn}({s('time')}), {s('perf_counter')})()")
+    a(f"{vacc} = {obn(0)}")
+    a(f"for {vi} in range({obn(iterations)}):")
+    a(f"    {vacc} = ({vacc} ^ {vi}) & {obn(0xFFFF)}")
+    a(f"{vt1} = getattr({imp_fn}({s('time')}), {s('perf_counter')})()")
+    a(f"if ({vt1} - {vt0}) > {max_seconds}: {exit_call}")
+
+    return lines
