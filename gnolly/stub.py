@@ -129,8 +129,7 @@ def generate_stub(
     b_fn     = N[1]   # bytes decoder function name
 
     # Module handles
-    h_sys    = N[2];  h_marshal = N[3];  h_hash   = N[4]
-    h_zlib   = N[5];  h_lzma    = N[6];  h_bz2    = N[7]
+    h_sys    = N[2];  h_hash    = N[4]
     h_blt    = N[131]  # builtins module handle -> used to obfuscate None/True/False
     h_os     = N[8];  h_aes_cls = N[9]
 
@@ -202,11 +201,7 @@ def generate_stub(
 
     # ── Imports ───────────────────────────────────────────────────────────────
     a(_obf_import("sys",     h_sys,    s_fn, str_key, imp_fn))
-    a(_obf_import("marshal", h_marshal,s_fn, str_key, imp_fn))
     a(_obf_import("hashlib", h_hash,   s_fn, str_key, imp_fn))
-    a(_obf_import("zlib",    h_zlib,   s_fn, str_key, imp_fn))
-    a(_obf_import("lzma",    h_lzma,   s_fn, str_key, imp_fn))
-    a(_obf_import("bz2",     h_bz2,    s_fn, str_key, imp_fn))
     a(_obf_import("os",      h_os,     s_fn, str_key, imp_fn))
     a(_obf_from_import("Crypto.Cipher", "AES", h_aes_cls, s_fn, str_key, imp_fn))
     a(_junk_assign(N[24]))
