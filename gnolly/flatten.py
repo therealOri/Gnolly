@@ -7,8 +7,7 @@ What this does
 ------------------------
 generate_stub() (see gnolly/stub.py) assembles the loader as a flat,
 top-to-bottom sequence of Python statements: decoders, imports, blob
-chunks, the base64-ish decode function, the opcode-unshuffle function,
-anti-debug checks, the key/KDF dance, the .so import hooks, the final
+chunks, the base64-ish decode function, anti-debug checks, the key/KDF dance, the .so import hooks, the final
 call into the native core. Even with every *name* replaced by a
 confusable homoglyph, that shape is still completely legible: a reader
 scrolls down and sees "here's where a function starts", "here's the
@@ -155,15 +154,22 @@ def _exec_hide(block: list[str], s_fn: str, str_key: bytes,
 # ---------------------------------------------------------------------------
 # Core block -> dispatch-loop emitter
 #
-# Four genuinely different control-flow mechanisms produce the same
+# Five genuinely different control-flow mechanisms produce the same
 # observable behavior (run these blocks, in this order) via different
 # underlying constructs, so a reader (or a script) that's fully solved
-# one still has two more to work out -> they don't share bytecode ops,
-# and two of the three don't even share the "STATE = ..." transition
-# idiom the other relies on.
+# one still has more to work out -> they don't share bytecode ops, and
+# most don't even share the "STATE = ..." transition idiom the others
+# rely on. generator_frame goes a step further than the rest: there is
+# no state variable to find at all, visible or otherwise -> "which
+# block runs next" lives purely in a suspended generator frame's
+# instruction pointer, something CPython tracks internally and that
+# never appears as an inspectable value anywhere in the file. It's
+# only offered where doing so is actually safe -> see the module_scope
+# parameter threaded through _flatten_stmt/_process_suite below.
 # ---------------------------------------------------------------------------
 
 _MECHANISMS = ("while_if", "match_case", "try_except", "dict_next")
+_MECHANISMS_MODULE_SCOPE = _MECHANISMS + ("generator_frame",)
 
 # A single elif chain reliably compiles up to ~5,900-5,950 branches before
 # CPython's parser fails with a MemoryError. This threshold sits well
@@ -298,6 +304,63 @@ def _render_dict_next(state_var, tokens, done_token, branches, indent, body_inde
     return out
 
 
+def _render_generator_frame(
+    blocks: list[list[str]],
+    indent: str,
+    rng: random.Random,
+    used_names: set,
+    n_decoys: int,
+) -> list[str]:
+    """
+    Genuinely different from the other four: there's no state value
+    being compared/dispatched on anywhere. Real block content becomes
+    ordinary sequential statements inside a generator function body,
+    separated by "yield" -> which block runs next is purely "wherever
+    this generator's frame is currently suspended", tracked by CPython
+    internally (the frame's instruction pointer), never a Python-level
+    value a reader or script can point at.
+
+    Unlike the token-dispatch mechanisms, this can't shuffle real
+    blocks' physical order -> a generator has no "jump to arbitrary
+    point" operation, only "resume where you left off", so execution
+    order here has to match textual order. Decoys are still mixed in,
+    just as dead branches gated on an impossible condition instead of
+    as unreachable dispatch-table entries.
+    """
+    gen_name = random_confusable_name(rng, used_names, length=rng.randint(9, 14))
+    gv       = random_confusable_name(rng, used_names, length=rng.randint(6, 11))
+    inner    = indent + "    "
+
+    out = [f"{indent}def {gen_name}():"]
+
+    def _emit_decoy() -> None:
+        a1, a2 = _tok_value(rng), _tok_value(rng)
+        out.append(f"{inner}if {_tok_expr(a1, rng)} == {_tok_expr(a2, rng)}:")
+        for _ in range(rng.randint(1, 3)):
+            out.append(f"{inner}    {_junk_line(rng, used_names)}")
+
+    remaining_decoys = n_decoys
+    for block in blocks:
+        if remaining_decoys > 0 and rng.random() < 0.5:
+            _emit_decoy()
+            remaining_decoys -= 1
+
+        content = _dedent_block(block)
+        for line in content:
+            out.append(inner + line if line.strip() else line)
+        out.append(f"{inner}yield")
+
+    while remaining_decoys > 0:
+        _emit_decoy()
+        remaining_decoys -= 1
+
+    out.append(f"{indent}{gv} = {gen_name}()")
+    out.append(f"{indent}for _ in range({_render_int(len(blocks), rng)}):")
+    out.append(f"{indent}    next({gv})")
+    out.append(f"{indent}    globals().update({gv}.gi_frame.f_locals)")
+    return out
+
+
 def _emit_dispatch(
     blocks: list[list[str]],
     indent: str,
@@ -309,6 +372,8 @@ def _emit_dispatch(
     str_key: bytes | None = None,
     exec_hide_eligible: list[bool] | None = None,
     mechanism: str | None = None,
+    module_scope: bool = True,
+    gen_safe: bool = True,
 ) -> list[str]:
     """
     blocks: ordered list of statement-groups that must execute in this exact order.
@@ -317,9 +382,22 @@ def _emit_dispatch(
     exec_hide_eligible: parallel to blocks & only blocks that are flagged True
             may be replaced with an exec()-hidden form.
     mechanism: one of "while_if" / "match_case" / "try_except" /
-            "dict_next", or None to pick randomly. Overridden
-            regardless (see _LARGE_BRANCH_THRESHOLD below) once branch
-            count gets large enough that the choice stops being safe.
+            "dict_next" / "generator_frame", or None to pick randomly.
+            Overridden regardless (see _LARGE_BRANCH_THRESHOLD below)
+            once branch count gets large enough that the choice stops
+            being safe.
+    module_scope: whether this dispatch's surrounding scope is still
+            module-level globals (true at the top level and for suites
+            nested only inside if/for/while/try/with, which don't
+            introduce new scopes) as opposed to inside an actual
+            function body. Only when true is "generator_frame" a safe
+            choice -> see _render_generator_frame for why.
+    gen_safe: whether this suite is free of a break/continue that
+            targets a loop OUTSIDE the suite itself (see
+            _has_unbound_break_continue). Also required for
+            "generator_frame" to be safe, for a different reason:
+            wrapping in a nested function would strand such a
+            break/continue outside any loop it can legally see.
     Returns the full replacement lines, at "indent" level.
     """
     n = len(blocks)
@@ -330,10 +408,19 @@ def _emit_dispatch(
     if exec_hide_eligible is None:
         exec_hide_eligible = [True] * n
 
+    pool = _MECHANISMS_MODULE_SCOPE if (module_scope and gen_safe) else _MECHANISMS
     if n + n_decoys > _LARGE_BRANCH_THRESHOLD:
         mechanism = "match_case"
     elif mechanism is None:
-        mechanism = rng.choice(_MECHANISMS)
+        mechanism = rng.choice(pool)
+    elif mechanism == "generator_frame" and not (module_scope and gen_safe):
+        mechanism = rng.choice(_MECHANISMS)  # caller-requested but unsafe here
+
+    if mechanism == "generator_frame":
+        try:
+            return _render_generator_frame(blocks, indent, rng, used_names, n_decoys)
+        except Exception:
+            mechanism = "while_if"  # fall back to a known-safe mechanism
 
     state_var = random_confusable_name(rng, used_names, length=rng.randint(8, 13))
     body_indent = indent + " " * 8
@@ -361,6 +448,32 @@ _COMPOUND_TYPES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try,
                    ast.With, ast.AsyncWith, ast.FunctionDef, ast.AsyncFunctionDef)
 if hasattr(ast, "TryStar"):
     _COMPOUND_TYPES = _COMPOUND_TYPES + (ast.TryStar,)
+
+
+def _has_unbound_break_continue(node: ast.stmt) -> bool:
+    """
+    True if node's subtree contains a break/continue that targets a
+    loop OUTSIDE node itself -> i.e. not nested inside a for/while
+    that's also inside this subtree. Doesn't descend into nested
+    function/class defs: a break/continue directly inside one of
+    those was already invalid Python in the original source.
+
+    Needed specifically for generator_frame: wrapping a suite in a
+    nested "def gen(): ... yield ..." moves its statements into a new
+    function scope, and break/continue can't cross a function
+    boundary to reach a loop that used to be a plain, scope-transparent
+    enclosing for/while (while/if/try/with don't introduce a new scope,
+    so this was never a problem for the other four mechanisms).
+    """
+    def walk(n: ast.AST, in_own_loop: bool) -> bool:
+        if isinstance(n, (ast.Break, ast.Continue)):
+            return not in_own_loop
+        if isinstance(n, (ast.For, ast.AsyncFor, ast.While)):
+            return any(walk(c, True) for c in ast.iter_child_nodes(n))
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return False
+        return any(walk(c, in_own_loop) for c in ast.iter_child_nodes(n))
+    return walk(node, False)
 
 
 def _suite_lists(node: ast.stmt):
@@ -405,6 +518,7 @@ def _flatten_stmt(
     base_decoys: int,
     depth: int,
     max_depth: int,
+    module_scope: bool = True,
 ) -> list[str]:
     """Return this statement's full replacement text, at its original
     absolute indentation, with every qualifying nested suite recursively
@@ -412,6 +526,8 @@ def _flatten_stmt(
     full = _slice(src_lines, node)
     if depth >= max_depth or not isinstance(node, _COMPOUND_TYPES):
         return full
+
+    child_scope = module_scope and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
 
     local = list(full)
     base_line = node.lineno
@@ -421,7 +537,7 @@ def _flatten_stmt(
         s_end = suite[-1].end_lineno - base_line + 1
         new_lines = _process_suite(
             suite, src_lines, rng, used_names, min_stmts, base_decoys,
-            depth + 1, max_depth,
+            depth + 1, max_depth, child_scope,
         )
         spans.append((s_start, s_end, new_lines))
 
@@ -439,15 +555,18 @@ def _process_suite(
     base_decoys: int,
     depth: int,
     max_depth: int,
+    module_scope: bool = True,
 ) -> list[str]:
     blocks = [
-        _flatten_stmt(s, src_lines, rng, used_names, min_stmts, base_decoys, depth, max_depth)
+        _flatten_stmt(s, src_lines, rng, used_names, min_stmts, base_decoys, depth, max_depth, module_scope)
         for s in suite_stmts
     ]
     if len(suite_stmts) >= min_stmts and depth <= max_depth:
         suite_indent = _line_indent(src_lines[suite_stmts[0].lineno - 1])
         n_decoys_here = max(0, base_decoys - depth)
-        return _emit_dispatch(blocks, suite_indent, rng, used_names, n_decoys=n_decoys_here)
+        gen_safe = not any(_has_unbound_break_continue(s) for s in suite_stmts)
+        return _emit_dispatch(blocks, suite_indent, rng, used_names, n_decoys=n_decoys_here,
+                               module_scope=module_scope, gen_safe=gen_safe)
     out: list[str] = []
     for b in blocks:
         out.extend(b)
@@ -507,17 +626,18 @@ def flatten_source(
 
     try:
         blocks = [
-            _flatten_stmt(node, src_lines, rng, used_names, min_stmts, top_decoys, 0, max_depth)
+            _flatten_stmt(node, src_lines, rng, used_names, min_stmts, top_decoys, 0, max_depth, True)
             for node in tree.body
         ]
         if len(tree.body) < min_stmts:
             result = "\n".join("\n".join(b) for b in blocks)
         else:
             eligible = _exec_hide_eligibility(tree.body, s_fn)
+            top_gen_safe = not any(_has_unbound_break_continue(s) for s in tree.body)
             final_lines = _emit_dispatch(
                 blocks, "", rng, used_names, n_decoys=top_decoys,
                 exec_hide_frac=exec_hide_frac, s_fn=s_fn, str_key=str_key,
-                exec_hide_eligible=eligible,
+                exec_hide_eligible=eligible, module_scope=True, gen_safe=top_gen_safe,
             )
             result = "\n".join(final_lines)
         ast.parse(result)  # Sanity check
