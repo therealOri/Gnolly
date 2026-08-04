@@ -203,6 +203,7 @@ def protect(
         silent          = silent,
         flatten         = flatten,
         self_hash       = self_hash,
+        will_be_packed  = pack,
     )
     if minify:
         _log("Minifying stub …")
