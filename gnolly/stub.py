@@ -118,6 +118,7 @@ def generate_stub(
     silent: bool = True,
     flatten: bool = True,
     self_hash: bool = True,
+    will_be_packed: bool = False,
 ) -> str:
     rng = random.SystemRandom()
     N   = _gen_names(160)
@@ -430,5 +431,6 @@ def generate_stub(
     # outside string literals, so the digest computed here stays valid
     # all the way through.
     if self_hash:
-        result = wrap_with_self_hash(result, src_var=N[150], reserved_names=set(N))
+        result = wrap_with_self_hash(result, src_var=N[150], reserved_names=set(N),
+                                      encode_chunks=not will_be_packed)
     return result
