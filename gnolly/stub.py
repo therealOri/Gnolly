@@ -430,5 +430,5 @@ def generate_stub(
     # outside string literals, so the digest computed here stays valid
     # all the way through.
     if self_hash:
-        result = wrap_with_self_hash(result, src_var=N[150])
+        result = wrap_with_self_hash(result, src_var=N[150], reserved_names=set(N))
     return result
