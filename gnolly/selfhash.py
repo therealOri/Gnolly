@@ -2,9 +2,9 @@
 gnolly.selfhash
 ~~~~~~~~~~~~~~~
 Self-hash of the stub's own source text, checked redundantly at startup.
-
 """
 from __future__ import annotations
+import base64
 import hashlib
 import random
 import secrets
@@ -18,25 +18,35 @@ from .flatten import flatten_source
 PLACEHOLDER_DIGEST = "0" * 64
 
 
-def _one_check_block(src_var: str, style: int) -> list[str]:
+def _encode_chunk(text: str, rng: random.Random) -> str:
+    """
+    Self-contained decode expression for one wrapper chunk: single-key
+    XOR + base85, mirroring gnolly.modhide's _encode_bulk_source.
+    """
+    key = rng.randint(1, 250)
+    raw = text.encode("utf-8")
+    xored = bytes(b ^ key for b in raw)
+    literal = base64.b85encode(xored).decode("ascii")
+    b85_ref = _hidden_import_attr("base64", "b85decode", rng)
+    used_local: set = set()
+    bv = random_confusable_name(rng, used_local, 1)
+    utf8_expr = _hidden_str_expr("utf-8", rng)
+    return f"bytes({bv} ^ {key} for {bv} in {b85_ref}({literal!r})).decode({utf8_expr})"
+
+
+def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]:
     """
     One self-contained self-hash check.
 
-    These blocks are prepended *ahead of* the main stub body (see
-    wrap_with_self_hash), which means none of the main body's own
-    machinery (its s_fn string decoder, its h_hash/h_sys module handles)
-    exists yet at this point -> every name/import this block needs has
+    These blocks are prepended ahead of the main stub body, which means none of the main body's own
+    machinery exists yet at this point -> every name/import this block needs has
     to come from strcodec's standalone helpers (_hidden_str_expr,
     _hidden_import_attr), which build a complete, dependency-free
     expression each time rather than assuming a decoder is already
     defined.
-
-    "style" picks among a few differently-shaped renderings so redundant
-    instances don't all look identical to a skim (or to a script
-    pattern-matching one of them).
     """
     rng = random.Random(secrets.randbits(64))
-    used: set = set()
+    used = reserved_names
     v_exp, v_can, v_re = (
         random_confusable_name(rng, used, length=rng.randint(6, 11)) for _ in range(3)
     )
@@ -71,12 +81,12 @@ def _one_check_block(src_var: str, style: int) -> list[str]:
 
 def _split_chunks(text: str, rng: random.Random) -> list[str]:
     """
-    Mirror stub.py's own _split_blob exactly: 4-11 random-length pieces
-    at random cut points. Deliberately a small, FIXED chunk count
-    (not scaled with body size).
+    Break "text" into random-length pieces at random cut points,
+    targeting a chunk count that scales with body size rather than a
+    small fixed count.
     """
     total = len(text)
-    n_chunks = secrets.randbelow(8) + 4
+    n_chunks = max(4, min(300, total // 8000))
     if total < n_chunks * 2:
         return [text] if text else [""]
     points = sorted(set(secrets.randbelow(total - 1) + 1 for _ in range(n_chunks - 1)))
@@ -105,7 +115,7 @@ def _recombine_expr(chunk_vars: list[str], rng: random.Random) -> str:
         return f"{reduce_ref}({add_ref}, {list_lit})"
 
 
-def _trigger_lines(src_var: str, rng: random.Random, style: int) -> list[str]:
+def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names: set) -> list[str]:
     """
     A few different ways to actually run "src_var" as code, instead of
     always a bare "exec(src_var, globals())" sitting unmistakably in the
@@ -115,7 +125,7 @@ def _trigger_lines(src_var: str, rng: random.Random, style: int) -> list[str]:
     one fresh -> triggering exec() as a side effect of ordinary-looking
     class construction rather than a direct call.
     """
-    used: set = set()
+    used = reserved_names
     if style == 0:
         return [f"exec({src_var}, globals())"]
     elif style == 1:
@@ -151,14 +161,14 @@ def _trigger_lines(src_var: str, rng: random.Random, style: int) -> list[str]:
         ]
 
 
-def _build_wrapper(final_body: str, src_var: str) -> str:
+def _build_wrapper(final_body: str, src_var: str, reserved_names: set) -> str:
     """
     Lay "final_body" out as several chunk assignments + a recombination
     expression + an exec trigger, then run the whole thing through
     flatten_source() for structural scatter.
     """
     rng = random.Random(secrets.randbits(64))
-    used: set = set()
+    used = reserved_names
 
     chunks = _split_chunks(final_body, rng)
     chunk_vars = [random_confusable_name(rng, used, length=rng.randint(8, 13)) for _ in chunks]
@@ -166,11 +176,11 @@ def _build_wrapper(final_body: str, src_var: str) -> str:
     lines = []
     a = lines.append
     for cv, chunk in zip(chunk_vars, chunks):
-        a(f"{cv} = {chunk!r}")
+        a(f"{cv} = {_encode_chunk(chunk, rng)}")
     a(f"{src_var} = {_recombine_expr(chunk_vars, rng)}")
     for cv in chunk_vars:
         a(f"{cv} = None")
-    lines.extend(_trigger_lines(src_var, rng, rng.randrange(3)))
+    lines.extend(_trigger_lines(src_var, rng, rng.randrange(3), used))
 
     wrapper_text = "\n".join(lines)
     try:
@@ -181,40 +191,24 @@ def _build_wrapper(final_body: str, src_var: str) -> str:
         return wrapper_text
 
 
-def wrap_with_self_hash(body_text: str, src_var: str, n_checks: int = 3) -> str:
+def wrap_with_self_hash(
+    body_text: str, src_var: str, n_checks: int = 3, reserved_names: set | None = None,
+) -> str:
     """
     Prepend n_checks independent self-hash check blocks to body_text,
     then wrap the whole thing so the checks can see their own exact
     source text via <src_var> at runtime.
-
-    Unlike a naive "<src_var> = <repr(final_body)>; exec(<src_var>,
-    globals())", the wrapper here never puts the whole (often very
-    large) body on one line: it's split into several chunk variables
-    (mirroring the same trick stub.py already uses for the main code
-    blob), recombined via one of a few equally-valid shapes, and the
-    final exec is triggered through one of a few different mechanisms
-    (plain exec, or one of the metaclass/descriptor tricks flatten.py's
-    exec-hide already uses) rather than a bare "exec(...)" call sitting
-    in the clear. The whole wrapper is then run through flatten_source()
-    itself for structural scatter -> safe to do here specifically
-    (unlike the check blocks, which must NOT go through flatten; see the
-    module docstring) because no s_fn/str_key is passed in, so flatten's
-    exec-hide feature never activates on it.
-
-    Falls back to returning body_text unchanged on any unexpected
-    condition (e.g. the placeholder run already appears in body_text
-    for an unrelated reason -> vanishingly unlikely given how the rest
-    of the pipeline encodes everything, but checked rather than assumed).
     """
+    reserved_names = set(reserved_names) if reserved_names else set()
     try:
         checks: list[str] = []
         for i in range(n_checks):
-            checks.extend(_one_check_block(src_var, style=i % 3))
+            checks.extend(_one_check_block(src_var, style=i % 3, reserved_names=reserved_names))
 
         pre_sub = "\n".join(checks) + "\n" + body_text
 
         if pre_sub.count(PLACEHOLDER_DIGEST) != n_checks:
-            return body_text  # something's off; return unwrapped rather than guess
+            return body_text  # something's off; retrun unwrapped rather than guess
 
         digest = hashlib.sha256(pre_sub.encode("utf-8")).hexdigest()
         final_body = pre_sub.replace(PLACEHOLDER_DIGEST, digest)
@@ -224,7 +218,7 @@ def wrap_with_self_hash(body_text: str, src_var: str, n_checks: int = 3) -> str:
         if hashlib.sha256(reconstructed.encode("utf-8")).hexdigest() != digest:
             return body_text
 
-        wrapped = _build_wrapper(final_body, src_var)
+        wrapped = _build_wrapper(final_body, src_var, reserved_names)
         compile(wrapped, "<selfhash_wrapper>", "exec")
         return wrapped
     except Exception:
