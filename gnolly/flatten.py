@@ -304,6 +304,46 @@ def _render_dict_next(state_var, tokens, done_token, branches, indent, body_inde
     return out
 
 
+def _collect_assigned_names(stmts_text: str) -> set[str]:
+    """
+    Names bound (assignment targets, for-loop targets, with-as,
+    except-as, walrus, augmented assignment) at the TOP LEVEL of
+    stmts_text's own scope -> i.e. NOT inside a nested function/class/
+    lambda body, which has its own real scope and needs no help here.
+    """
+    try:
+        tree = ast.parse(stmts_text)
+    except SyntaxError:
+        return set()
+
+    names: set[str] = set()
+
+    class _Collector(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):
+            pass  # own real scope; don't descend
+
+        def visit_AsyncFunctionDef(self, node):
+            pass
+
+        def visit_ClassDef(self, node):
+            pass
+
+        def visit_Lambda(self, node):
+            pass
+
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Store):
+                names.add(node.id)
+
+        def visit_ExceptHandler(self, node):
+            if node.name:
+                names.add(node.name)
+            self.generic_visit(node)
+
+    _Collector().visit(tree)
+    return names
+
+
 def _render_generator_frame(
     blocks: list[list[str]],
     indent: str,
@@ -312,14 +352,14 @@ def _render_generator_frame(
     n_decoys: int,
 ) -> list[str]:
     """
-    Genuinely different from the other four: there's no state value
+    Genuinely different from the others: there's no state value
     being compared/dispatched on anywhere. Real block content becomes
     ordinary sequential statements inside a generator function body,
     separated by "yield" -> which block runs next is purely "wherever
     this generator's frame is currently suspended", tracked by CPython
     internally (the frame's instruction pointer), never a Python-level
     value a reader or script can point at.
-
+    
     Unlike the token-dispatch mechanisms, this can't shuffle real
     blocks' physical order -> a generator has no "jump to arbitrary
     point" operation, only "resume where you left off", so execution
@@ -331,13 +371,16 @@ def _render_generator_frame(
     gv       = random_confusable_name(rng, used_names, length=rng.randint(6, 11))
     inner    = indent + "    "
 
-    out = [f"{indent}def {gen_name}():"]
+    body_lines: list[str] = []
+    assigned: set[str] = set()
 
     def _emit_decoy() -> None:
         a1, a2 = _tok_value(rng), _tok_value(rng)
-        out.append(f"{inner}if {_tok_expr(a1, rng)} == {_tok_expr(a2, rng)}:")
+        body_lines.append(f"{inner}if {_tok_expr(a1, rng)} == {_tok_expr(a2, rng)}:")
         for _ in range(rng.randint(1, 3)):
-            out.append(f"{inner}    {_junk_line(rng, used_names)}")
+            junk = _junk_line(rng, used_names)
+            body_lines.append(f"{inner}    {junk}")
+            assigned |= _collect_assigned_names(junk)
 
     remaining_decoys = n_decoys
     for block in blocks:
@@ -346,13 +389,19 @@ def _render_generator_frame(
             remaining_decoys -= 1
 
         content = _dedent_block(block)
+        assigned |= _collect_assigned_names("\n".join(content))
         for line in content:
-            out.append(inner + line if line.strip() else line)
-        out.append(f"{inner}yield")
+            body_lines.append(inner + line if line.strip() else line)
+        body_lines.append(f"{inner}yield")
 
     while remaining_decoys > 0:
         _emit_decoy()
         remaining_decoys -= 1
+
+    out = [f"{indent}def {gen_name}():"]
+    if assigned:
+        out.append(f"{inner}global {', '.join(sorted(assigned))}")
+    out.extend(body_lines)
 
     out.append(f"{indent}{gv} = {gen_name}()")
     out.append(f"{indent}for _ in range({_render_int(len(blocks), rng)}):")
@@ -408,12 +457,14 @@ def _emit_dispatch(
     if exec_hide_eligible is None:
         exec_hide_eligible = [True] * n
 
-    pool = _MECHANISMS_MODULE_SCOPE if (module_scope and gen_safe) else _MECHANISMS
+    # generator_frame and exec-hide are mutually exclusive within one flatten_source() call.
+    exec_hide_possible = bool(s_fn and str_key and exec_hide_frac > 0)
+    pool = _MECHANISMS_MODULE_SCOPE if (module_scope and gen_safe and not exec_hide_possible) else _MECHANISMS
     if n + n_decoys > _LARGE_BRANCH_THRESHOLD:
         mechanism = "match_case"
     elif mechanism is None:
         mechanism = rng.choice(pool)
-    elif mechanism == "generator_frame" and not (module_scope and gen_safe):
+    elif mechanism == "generator_frame" and not (module_scope and gen_safe and not exec_hide_possible):
         mechanism = rng.choice(_MECHANISMS)  # caller-requested but unsafe here
 
     if mechanism == "generator_frame":
@@ -520,9 +571,11 @@ def _flatten_stmt(
     max_depth: int,
     module_scope: bool = True,
 ) -> list[str]:
-    """Return this statement's full replacement text, at its original
+    """
+    Return this statement's full replacement text, at its original
     absolute indentation, with every qualifying nested suite recursively
-    flattened first (bottom-up)."""
+    flattened first (bottom-up).
+    """
     full = _slice(src_lines, node)
     if depth >= max_depth or not isinstance(node, _COMPOUND_TYPES):
         return full
