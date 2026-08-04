@@ -161,11 +161,21 @@ def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names:
         ]
 
 
-def _build_wrapper(final_body: str, src_var: str, reserved_names: set) -> str:
+def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_chunks: bool = True) -> str:
     """
     Lay "final_body" out as several chunk assignments + a recombination
     expression + an exec trigger, then run the whole thing through
     flatten_source() for structural scatter.
+
+    encode_chunks: whether each chunk is XOR+base85 encoded (see
+    _encode_chunk) or stored as a plain repr(). Plain repr() is much
+    cheaper to build AND, critically, stays highly compressible (it's
+    still the original, repetitive obfuscated source) -> the right
+    choice whenever pack_source() is going to compress this whole
+    result afterward anyway, since at that point nothing here is
+    directly visible in the shipped file regardless of which form it
+    takes, and encoding first actively hurts: XOR+base85, and destroys the
+    redundancy pack_source()'s compressor needs.
     """
     rng = random.Random(secrets.randbits(64))
     used = reserved_names
@@ -176,7 +186,8 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set) -> str:
     lines = []
     a = lines.append
     for cv, chunk in zip(chunk_vars, chunks):
-        a(f"{cv} = {_encode_chunk(chunk, rng)}")
+        rendered = _encode_chunk(chunk, rng) if encode_chunks else repr(chunk)
+        a(f"{cv} = {rendered}")
     a(f"{src_var} = {_recombine_expr(chunk_vars, rng)}")
     for cv in chunk_vars:
         a(f"{cv} = None")
@@ -193,11 +204,17 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set) -> str:
 
 def wrap_with_self_hash(
     body_text: str, src_var: str, n_checks: int = 3, reserved_names: set | None = None,
+    encode_chunks: bool = True,
 ) -> str:
     """
     Prepend n_checks independent self-hash check blocks to body_text,
     then wrap the whole thing so the checks can see their own exact
     source text via <src_var> at runtime.
+
+    encode_chunks: see _build_wrapper. Pass False when the caller
+    knows pack_source() will compress this result afterward -> the
+    default of True is the safe choice for direct/standalone callers
+    who might ship this text as-is.
     """
     reserved_names = set(reserved_names) if reserved_names else set()
     try:
@@ -218,7 +235,7 @@ def wrap_with_self_hash(
         if hashlib.sha256(reconstructed.encode("utf-8")).hexdigest() != digest:
             return body_text
 
-        wrapped = _build_wrapper(final_body, src_var, reserved_names)
+        wrapped = _build_wrapper(final_body, src_var, reserved_names, encode_chunks=encode_chunks)
         compile(wrapped, "<selfhash_wrapper>", "exec")
         return wrapped
     except Exception:
