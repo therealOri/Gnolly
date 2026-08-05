@@ -10,7 +10,6 @@ import random
 import secrets
 from .namegen import random_confusable_name
 from .strcodec import _hidden_str_expr, _hidden_import_attr
-from .flatten import flatten_source
 
 # 64 literal ASCII '0' chars -> exactly a sha256 hexdigest's width. This
 # exact run must appear in the body text ONLY where check blocks put it;
@@ -18,20 +17,24 @@ from .flatten import flatten_source
 PLACEHOLDER_DIGEST = "0" * 64
 
 
-def _encode_chunk(text: str, rng: random.Random) -> str:
+def _shared_chunk_decode_refs(rng: random.Random) -> tuple[str, str]:
+    return _hidden_import_attr("base64", "b85decode", rng), _hidden_str_expr("utf-8", rng)
+
+
+def _encode_chunk(text: str, rng: random.Random, b85_var: str, u8_var: str) -> str:
     """
     Self-contained decode expression for one wrapper chunk: single-key
     XOR + base85, mirroring gnolly.modhide's _encode_bulk_source.
+    b85_var/u8_var are plain variable names the caller already
+    assigned via _shared_chunk_decode_refs.
     """
     key = rng.randint(1, 250)
     raw = text.encode("utf-8")
     xored = bytes(b ^ key for b in raw)
     literal = base64.b85encode(xored).decode("ascii")
-    b85_ref = _hidden_import_attr("base64", "b85decode", rng)
     used_local: set = set()
     bv = random_confusable_name(rng, used_local, 1)
-    utf8_expr = _hidden_str_expr("utf-8", rng)
-    return f"bytes({bv} ^ {key} for {bv} in {b85_ref}({literal!r})).decode({utf8_expr})"
+    return f"bytes({bv} ^ {key} for {bv} in {b85_var}({literal!r})).decode({u8_var})"
 
 
 def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]:
@@ -164,8 +167,7 @@ def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names:
 def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_chunks: bool = True) -> str:
     """
     Lay "final_body" out as several chunk assignments + a recombination
-    expression + an exec trigger, then run the whole thing through
-    flatten_source() for structural scatter.
+    expression + an exec trigger.
 
     encode_chunks: whether each chunk is XOR+base85 encoded (see
     _encode_chunk) or stored as a plain repr(). Plain repr() is much
@@ -174,7 +176,7 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_ch
     choice whenever pack_source() is going to compress this whole
     result afterward anyway, since at that point nothing here is
     directly visible in the shipped file regardless of which form it
-    takes, and encoding first actively hurts: XOR+base85, and destroys the
+    takes, and encoding first actively hurts: XOR+base85 and destroys the
     redundancy pack_source()'s compressor needs.
     """
     rng = random.Random(secrets.randbits(64))
@@ -185,21 +187,27 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_ch
 
     lines = []
     a = lines.append
+    if encode_chunks:
+        b85_var, u8_var = (random_confusable_name(rng, used, length=rng.randint(6, 10)) for _ in range(2))
+        b85_expr, utf8_expr = _shared_chunk_decode_refs(rng)
+        a(f"{b85_var} = {b85_expr}")
+        a(f"{u8_var} = {utf8_expr}")
     for cv, chunk in zip(chunk_vars, chunks):
-        rendered = _encode_chunk(chunk, rng) if encode_chunks else repr(chunk)
+        rendered = _encode_chunk(chunk, rng, b85_var, u8_var) if encode_chunks else repr(chunk)
         a(f"{cv} = {rendered}")
     a(f"{src_var} = {_recombine_expr(chunk_vars, rng)}")
+    if encode_chunks:
+        a(f"{b85_var} = {u8_var} = None")
     for cv in chunk_vars:
         a(f"{cv} = None")
     lines.extend(_trigger_lines(src_var, rng, rng.randrange(3), used))
 
     wrapper_text = "\n".join(lines)
     try:
-        flattened = flatten_source(wrapper_text)
-        compile(flattened, "<selfhash_wrapper_check>", "exec")
-        return flattened
+        compile(wrapper_text, "<selfhash_wrapper_check>", "exec")
     except Exception:
-        return wrapper_text
+        pass  # caller's own compile() sanity check in wrap_with_self_hash will catch the real problems
+    return wrapper_text
 
 
 def wrap_with_self_hash(
