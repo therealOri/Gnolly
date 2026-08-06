@@ -192,14 +192,18 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_ch
         b85_expr, utf8_expr = _shared_chunk_decode_refs(rng)
         a(f"{b85_var} = {b85_expr}")
         a(f"{u8_var} = {utf8_expr}")
-    for cv, chunk in zip(chunk_vars, chunks):
+    for idx, (cv, chunk) in enumerate(zip(chunk_vars, chunks)):
         rendered = _encode_chunk(chunk, rng, b85_var, u8_var) if encode_chunks else repr(chunk)
         a(f"{cv} = {rendered}")
+        if idx % 4 == 3:
+            a(f"if len({cv}) >= 0: pass")
     a(f"{src_var} = {_recombine_expr(chunk_vars, rng)}")
     if encode_chunks:
         a(f"{b85_var} = {u8_var} = None")
-    for cv in chunk_vars:
+    for idx, cv in enumerate(chunk_vars):
         a(f"{cv} = None")
+        if idx % 6 == 5:
+            a(f"if {cv} is None: pass")
     lines.extend(_trigger_lines(src_var, rng, rng.randrange(3), used))
 
     wrapper_text = "\n".join(lines)
