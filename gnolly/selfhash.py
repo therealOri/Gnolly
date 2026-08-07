@@ -9,7 +9,7 @@ import hashlib
 import random
 import secrets
 from .namegen import random_confusable_name
-from .strcodec import _hidden_str_expr, _hidden_import_attr
+from .strcodec import _hidden_str_expr, _hidden_import_attr, _render_int
 
 # 64 literal ASCII '0' chars -> exactly a sha256 hexdigest's width. This
 # exact run must appear in the body text ONLY where check blocks put it;
@@ -17,15 +17,19 @@ from .strcodec import _hidden_str_expr, _hidden_import_attr
 PLACEHOLDER_DIGEST = "0" * 64
 
 
-def _shared_chunk_decode_refs(rng: random.Random) -> tuple[str, str]:
-    return _hidden_import_attr("base64", "b85decode", rng), _hidden_str_expr("utf-8", rng)
+def _shared_chunk_decode_refs(rng: random.Random) -> tuple[str, str, str]:
+    return (
+        _hidden_import_attr("base64", "b85decode", rng),
+        _hidden_str_expr("utf-8", rng),
+        _hidden_str_expr("decode", rng),
+    )
 
 
-def _encode_chunk(text: str, rng: random.Random, b85_var: str, u8_var: str) -> str:
+def _encode_chunk(text: str, rng: random.Random, b85_var: str, u8_var: str, dec_var: str) -> str:
     """
     Self-contained decode expression for one wrapper chunk: single-key
     XOR + base85, mirroring gnolly.modhide's _encode_bulk_source.
-    b85_var/u8_var are plain variable names the caller already
+    b85_var/u8_var/dec_var are plain variable names the caller already
     assigned via _shared_chunk_decode_refs.
     """
     key = rng.randint(1, 250)
@@ -34,19 +38,19 @@ def _encode_chunk(text: str, rng: random.Random, b85_var: str, u8_var: str) -> s
     literal = base64.b85encode(xored).decode("ascii")
     used_local: set = set()
     bv = random_confusable_name(rng, used_local, 1)
-    return f"bytes({bv} ^ {key} for {bv} in {b85_var}({literal!r})).decode({u8_var})"
+    return f"getattr(bytes({bv} ^ {key} for {bv} in {b85_var}({literal!r})), {dec_var})({u8_var})"
 
 
 def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]:
     """
     One self-contained self-hash check.
 
-    These blocks are prepended ahead of the main stub body, which means none of the main body's own
-    machinery exists yet at this point -> every name/import this block needs has
-    to come from strcodec's standalone helpers (_hidden_str_expr,
-    _hidden_import_attr), which build a complete, dependency-free
-    expression each time rather than assuming a decoder is already
-    defined.
+    These blocks are prepended ahead of the main stub body, which
+    means none of the main body's own machinery exists yet at this
+    point -> every name/import this block needs has to come from
+    strcodec's standalone helpers (_hidden_str_expr, _hidden_import_attr),
+    which build a complete, dependency-free expression each time
+    rather than assuming a decoder is already defined.
     """
     rng = random.Random(secrets.randbits(64))
     used = reserved_names
@@ -65,10 +69,13 @@ def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]
     # wherever the digest now sits. Written as an expression, not a
     # literal 64-char run, so the build-time substitution pass can't
     # accidentally touch it.
-    a(f'{v_can} = {src_var}.replace({v_exp}, "0" * 64)')
+    replace_str = _hidden_str_expr("replace", rng)
+    a(f'{v_can} = getattr({src_var}, {replace_str})({v_exp}, "0" * 64)')
     hash_ref = _hidden_import_attr("hashlib", "sha256", rng)
     utf8_lit = _hidden_str_expr("utf-8", rng)
-    a(f"{v_re} = {hash_ref}({v_can}.encode({utf8_lit})).hexdigest()")
+    encode_str = _hidden_str_expr("encode", rng)
+    hexdigest_str = _hidden_str_expr("hexdigest", rng)
+    a(f"{v_re} = getattr({hash_ref}(getattr({v_can}, {encode_str})({utf8_lit})), {hexdigest_str})()")
 
     if style == 0:
         a(f"if {v_re} != {v_exp}: {exit_ref}(1)")
@@ -111,27 +118,61 @@ def _recombine_expr(chunk_vars: list[str], rng: random.Random) -> str:
     if style == 0:
         return " + ".join(chunk_vars)
     elif style == 1:
-        return f"''.join({list_lit})"
+        join_str = _hidden_str_expr("join", rng)
+        return f"getattr('', {join_str})({list_lit})"
     else:
         reduce_ref = _hidden_import_attr("functools", "reduce", rng)
         add_ref = _hidden_import_attr("operator", "add", rng)
         return f"{reduce_ref}({add_ref}, {list_lit})"
 
 
+def _chunk_guard_lines(
+    chunk_vars: list[str], idx: int, expected_len: int, rng: random.Random, used: set,
+) -> list[str]:
+    """
+    A real per-chunk length check, run right after that chunk is
+    decoded.
+    """
+    cv = chunk_vars[idx]
+    v_len = random_confusable_name(rng, used, length=rng.randint(6, 11))
+    style = rng.randrange(3)
+    lines = []
+    a = lines.append
+
+    if idx > 0:
+        victim = chunk_vars[rng.randrange(idx)]
+        response = f"{victim} = {victim}[:0]"
+    else:
+        exit_ref = _hidden_import_attr("sys", "exit", rng)
+        response = f"{exit_ref}(1)"
+
+    len_lit = _render_int(expected_len, rng)
+    if style == 0:
+        a(f"{v_len} = len({cv})")
+        a(f"if {v_len} != {len_lit}:")
+        a(f"    {response}")
+    elif style == 1:
+        a(f"if len({cv}) - ({len_lit}):")
+        a(f"    {response}")
+    else:
+        a(f"try:")
+        a(f"    if len({cv}) != {len_lit}: raise ValueError")
+        a(f"except ValueError:")
+        a(f"    {response}")
+    return lines
+
+
 def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names: set) -> list[str]:
     """
-    A few different ways to actually run "src_var" as code, instead of
-    always a bare "exec(src_var, globals())" sitting unmistakably in the
-    clear. Styles 1/2 reuse the same metaclass-__new__ / descriptor-
-    __set_name__ indirection flatten.py's exec-hide already relies on,
-    adapted here to run an already-assembled string rather than decode
-    one fresh -> triggering exec() as a side effect of ordinary-looking
-    class construction rather than a direct call.
+    A few different ways to actually run "src_var" as code. All three
+    styles trigger exec() as a side effect of ordinary-looking class
+    construction rather than a direct, bare call. There is no "plain
+    exec(src_var, globals())" option in rotation; the word exec never
+    sits unmistakably in the clear on its own line.
     """
     used = reserved_names
+    style = style % 3
     if style == 0:
-        return [f"exec({src_var}, globals())"]
-    elif style == 1:
         meta_name, cls_name, fn_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
@@ -147,7 +188,7 @@ def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names:
             f"class {cls_name}(metaclass={meta_name}):",
             f"    pass",
         ]
-    else:
+    elif style == 1:
         desc_name, cls_name, attr_name, fn_name = (
             random_confusable_name(rng, used, length=rng.randint(6, 12)) for _ in range(4)
         )
@@ -162,12 +203,29 @@ def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names:
             f"class {cls_name}:",
             f"    {attr_name} = {desc_name}()",
         ]
+    else:
+        base_name, sub_name, fn_name = (
+            random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
+        )
+        p_cls, p_kw = (random_confusable_name(rng, used, 1) for _ in range(2))
+        init_sub_str = _hidden_str_expr("__init_subclass__", rng)
+        classmethod_ref = _hidden_import_attr("builtins", "classmethod", rng)
+        return [
+            f"class {base_name}:",
+            f"    pass",
+            f"def {fn_name}({p_cls}, **{p_kw}):",
+            f"    exec({src_var}, globals())",
+            f"setattr({base_name}, {init_sub_str}, {classmethod_ref}({fn_name}))",
+            f"class {sub_name}({base_name}):",
+            f"    pass",
+        ]
 
 
 def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_chunks: bool = True) -> str:
     """
-    Lay "final_body" out as several chunk assignments + a recombination
-    expression + an exec trigger.
+    Lay "final_body" out as several chunk assignments (each followed
+    by a real length-verification guard) + a
+    recombination expression + an exec trigger.
 
     encode_chunks: whether each chunk is XOR+base85 encoded (see
     _encode_chunk) or stored as a plain repr(). Plain repr() is much
@@ -188,29 +246,39 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_ch
     lines = []
     a = lines.append
     if encode_chunks:
-        b85_var, u8_var = (random_confusable_name(rng, used, length=rng.randint(6, 10)) for _ in range(2))
-        b85_expr, utf8_expr = _shared_chunk_decode_refs(rng)
+        b85_var, u8_var, dec_var = (
+            random_confusable_name(rng, used, length=rng.randint(6, 10)) for _ in range(3)
+        )
+        b85_expr, utf8_expr, dec_expr = _shared_chunk_decode_refs(rng)
         a(f"{b85_var} = {b85_expr}")
         a(f"{u8_var} = {utf8_expr}")
+        a(f"{dec_var} = {dec_expr}")
+
     for idx, (cv, chunk) in enumerate(zip(chunk_vars, chunks)):
-        rendered = _encode_chunk(chunk, rng, b85_var, u8_var) if encode_chunks else repr(chunk)
+        rendered = _encode_chunk(chunk, rng, b85_var, u8_var, dec_var) if encode_chunks else repr(chunk)
         a(f"{cv} = {rendered}")
-        if idx % 4 == 3:
-            a(f"if len({cv}) >= 0: pass")
+        # Guard every chunk when encoded (this is where tampering would
+        # actually need catching); skip when plain repr(), since pack=True
+        # already compresses this and there's nothing to defend here.
+        if encode_chunks:
+            lines.extend(_chunk_guard_lines(chunk_vars, idx, len(chunk), rng, used))
+
     a(f"{src_var} = {_recombine_expr(chunk_vars, rng)}")
-    if encode_chunks:
-        a(f"{b85_var} = {u8_var} = None")
-    for idx, cv in enumerate(chunk_vars):
-        a(f"{cv} = None")
-        if idx % 6 == 5:
-            a(f"if {cv} is None: pass")
+
+    # Null out chunk references so they're eligible for GC as soon as
+    # possible rather than lingering.
+    all_null = ([b85_var, u8_var, dec_var] if encode_chunks else []) + chunk_vars
+    for i in range(0, len(all_null), 6):
+        batch = all_null[i : i + 6]
+        a(" = ".join(batch) + " = None")
+
     lines.extend(_trigger_lines(src_var, rng, rng.randrange(3), used))
 
     wrapper_text = "\n".join(lines)
     try:
         compile(wrapper_text, "<selfhash_wrapper_check>", "exec")
     except Exception:
-        pass  # caller's own compile() sanity check in wrap_with_self_hash will catch the real problems
+        pass  # caller's own compile() sanity check in wrap_with_self_hash will catch real problems
     return wrapper_text
 
 
@@ -237,7 +305,7 @@ def wrap_with_self_hash(
         pre_sub = "\n".join(checks) + "\n" + body_text
 
         if pre_sub.count(PLACEHOLDER_DIGEST) != n_checks:
-            return body_text  # something's off; retrun unwrapped rather than guess
+            return body_text  # something's off; return unwrapped rather than guess
 
         digest = hashlib.sha256(pre_sub.encode("utf-8")).hexdigest()
         final_body = pre_sub.replace(PLACEHOLDER_DIGEST, digest)
