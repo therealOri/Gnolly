@@ -55,7 +55,7 @@ from __future__ import annotations
 import random
 import secrets
 from .namegen import random_confusable_name
-from .strcodec import _enc_str, _hidden_import_attr, _hidden_str_expr, _render_int
+from .strcodec import _enc_str, _hidden_import_attr, _hidden_str_expr, _render_int, _hidden_exec_ref
 
 
 def _hidden_bytes_expr(data: bytes, rng: random.Random) -> str:
@@ -180,7 +180,7 @@ def generate_hidden_decode_import(
     a(f"class {loader_cls}:")
     a(f"    def create_module({p_self}, {p_spec}): return None")
     a(f"    def exec_module({p_self}, {p_module}):")
-    a(f"        exec({decode_tmpl.format(v_lit)}, {p_module}.__dict__)")
+    a(f"        ({_hidden_exec_ref(rng)})({decode_tmpl.format(v_lit)}, {p_module}.__dict__)")
     a("")
 
     # ── Finder ────────────────────────────────────────────────────────────
