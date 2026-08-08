@@ -9,7 +9,7 @@ import hashlib
 import random
 import secrets
 from .namegen import random_confusable_name
-from .strcodec import _hidden_str_expr, _hidden_import_attr, _render_int
+from .strcodec import _hidden_str_expr, _hidden_import_attr, _render_int, _hidden_exec_ref
 
 # 64 literal ASCII '0' chars -> exactly a sha256 hexdigest's width. This
 # exact run must appear in the body text ONLY where check blocks put it;
@@ -165,13 +165,12 @@ def _chunk_guard_lines(
 def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names: set) -> list[str]:
     """
     A few different ways to actually run "src_var" as code. All three
-    styles trigger exec() as a side effect of ordinary-looking class
-    construction rather than a direct, bare call. There is no "plain
-    exec(src_var, globals())" option in rotation; the word exec never
-    sits unmistakably in the clear on its own line.
+    styles trigger exec() as a side effect of ordinary-looking
+    class construction rather than a direct, bare call.
     """
     used = reserved_names
     style = style % 3
+    exec_ref = _hidden_exec_ref(rng)
     if style == 0:
         meta_name, cls_name, fn_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
@@ -182,7 +181,7 @@ def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names:
             f"class {meta_name}(type):",
             f"    pass",
             f"def {fn_name}({p_mcs}, {p_name}, {p_bases}, {p_ns}):",
-            f"    exec({src_var}, globals())",
+            f"    ({exec_ref})({src_var}, globals())",
             f"    return getattr(type, {new_str})({p_mcs}, {p_name}, {p_bases}, {p_ns})",
             f"setattr({meta_name}, {new_str}, {fn_name})",
             f"class {cls_name}(metaclass={meta_name}):",
@@ -198,7 +197,7 @@ def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names:
             f"class {desc_name}:",
             f"    pass",
             f"def {fn_name}({p_self}, {p_owner}, {p_ownname}):",
-            f"    exec({src_var}, globals())",
+            f"    ({exec_ref})({src_var}, globals())",
             f"setattr({desc_name}, {set_name_str}, {fn_name})",
             f"class {cls_name}:",
             f"    {attr_name} = {desc_name}()",
@@ -214,7 +213,7 @@ def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names:
             f"class {base_name}:",
             f"    pass",
             f"def {fn_name}({p_cls}, **{p_kw}):",
-            f"    exec({src_var}, globals())",
+            f"    ({exec_ref})({src_var}, globals())",
             f"setattr({base_name}, {init_sub_str}, {classmethod_ref}({fn_name}))",
             f"class {sub_name}({base_name}):",
             f"    pass",
