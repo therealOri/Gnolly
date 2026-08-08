@@ -56,7 +56,7 @@ import random
 import secrets
 import zlib
 
-from .strcodec import _hidden_import_call, _hidden_str_expr, random_confusable_name
+from .strcodec import _hidden_import_call, _hidden_str_expr, random_confusable_name, _hidden_exec_ref
 from .minify import minify_source
 
 _ALGOS = {
@@ -154,7 +154,7 @@ def pack_source(source: str) -> str:
     lines = [
         f"{blob_var} = {b85_text!r}",
         f"{imp_var} = {_hidden_import_call(rng)}",
-        f"exec({payload}, globals())",
+        f"({_hidden_exec_ref(rng)})({payload}, globals())",
     ]
     result = "\n".join(lines)
 
