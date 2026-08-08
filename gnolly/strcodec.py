@@ -153,6 +153,23 @@ def _hidden_import_call(rng: random.Random | None = None) -> str:
             f"(globals()[{builtins_key}])")
 
 
+def _hidden_exec_ref(rng: random.Random | None = None) -> str:
+    """
+    Expression that evaluates to the exec builtin, without the literal
+    call "exec(" appearing anywhere in the source -> mirrors
+    _hidden_import_call's own approach.
+    """
+    if rng is None:
+        rng = random.Random(secrets.randbits(64))
+    builtins_key = _hidden_str_expr("__builtins__", rng)
+    exec_attr = _hidden_str_expr("exec", rng)
+    used_local: set = set()
+    b = random_confusable_name(rng, used_local, length=rng.randint(6, 10))
+    return (f"(lambda {b}: getattr({b}, {exec_attr}) "
+            f"if not isinstance({b}, dict) else {b}[{exec_attr}])"
+            f"(globals()[{builtins_key}])")
+
+
 def _attrgetter_ref(rng: random.Random) -> str:
     """Expression that evaluates to operator.attrgetter."""
     mod_expr = f"{_hidden_import_call(rng)}({_hidden_str_expr('operator', rng)})"
