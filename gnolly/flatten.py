@@ -23,7 +23,7 @@ import random
 import secrets
 
 from .namegen import random_confusable_name
-from .strcodec import _enc_str, _bool_int_expr, _render_int
+from .strcodec import _enc_str, _bool_int_expr, _render_int, _hidden_exec_ref
 from .minify import minify_source
 
 __all__ = ["flatten_source"]
@@ -103,9 +103,10 @@ def _exec_hide(block: list[str], s_fn: str, str_key: bytes,
 
     decode_call = f"{s_fn}({encoded_expr})"
     style = rng.randrange(3)
+    exec_ref = _hidden_exec_ref(rng)
 
     if style == 0:
-        return [f"exec({decode_call}, globals())"]
+        return [f"({exec_ref})({decode_call}, globals())"]
 
     elif style == 1:
         meta_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
@@ -116,12 +117,12 @@ def _exec_hide(block: list[str], s_fn: str, str_key: bytes,
         try:
             new_enc = _enc_str("__new__", str_key)
         except Exception:
-            return [f"exec({decode_call}, globals())"]
+            return [f"({exec_ref})({decode_call}, globals())"]
         return [
             f"class {meta_name}(type):",
             f"    pass",
             f"def {fn_name}({p_mcs}, {p_name}, {p_bases}, {p_ns}):",
-            f"    exec({decode_call}, globals())",
+            f"    ({exec_ref})({decode_call}, globals())",
             f"    return getattr(type, {s_fn}({new_enc}))({p_mcs}, {p_name}, {p_bases}, {p_ns})",
             f"setattr({meta_name}, {s_fn}({new_enc}), {fn_name})",
             f"class {cls_name}(metaclass={meta_name}):",
@@ -138,12 +139,12 @@ def _exec_hide(block: list[str], s_fn: str, str_key: bytes,
         try:
             set_name_enc = _enc_str("__set_name__", str_key)
         except Exception:
-            return [f"exec({decode_call}, globals())"]
+            return [f"({exec_ref})({decode_call}, globals())"]
         return [
             f"class {desc_name}:",
             f"    pass",
             f"def {fn_name}({p_self}, {p_owner}, {p_ownname}):",
-            f"    exec({decode_call}, globals())",
+            f"    ({exec_ref})({decode_call}, globals())",
             f"setattr({desc_name}, {s_fn}({set_name_enc}), {fn_name})",
             f"class {cls_name}:",
             f"    {attr_name} = {desc_name}()",
@@ -359,7 +360,7 @@ def _render_generator_frame(
     this generator's frame is currently suspended", tracked by CPython
     internally (the frame's instruction pointer), never a Python-level
     value a reader or script can point at.
-    
+
     Unlike the token-dispatch mechanisms, this can't shuffle real
     blocks' physical order -> a generator has no "jump to arbitrary
     point" operation, only "resume where you left off", so execution
