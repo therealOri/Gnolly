@@ -444,10 +444,17 @@ def _emit_dispatch(
             choice -> see _render_generator_frame for why.
     gen_safe: whether this suite is free of a break/continue that
             targets a loop OUTSIDE the suite itself (see
-            _has_unbound_break_continue). Also required for
-            "generator_frame" to be safe, for a different reason:
-            wrapping in a nested function would strand such a
-            break/continue outside any loop it can legally see.
+            _has_unbound_break_continue). Gates ALL FIVE mechanisms,
+            not just generator_frame: while_if, match_case, try_except,
+            and dict_next all wrap their branches in their OWN while
+            loop, so a break/continue meant for an outer loop gets
+            silently captured by that wrapper instead of reaching it
+            -> Python's break/continue always target the nearest
+            enclosing loop syntactically, and there's no way to make a
+            nested while loop "transparent" to them for any of these
+            mechanisms. When False, dispatch is skipped entirely for
+            this suite -> it returns as plain sequential code, with no
+            structural obfuscation at this level.
     Returns the full replacement lines, at "indent" level.
     """
     n = len(blocks)
@@ -458,14 +465,20 @@ def _emit_dispatch(
     if exec_hide_eligible is None:
         exec_hide_eligible = [True] * n
 
+    if not gen_safe:
+        out: list[str] = []
+        for b in blocks:
+            out.extend(b)
+        return out
+
     # generator_frame and exec-hide are mutually exclusive within one flatten_source() call.
     exec_hide_possible = bool(s_fn and str_key and exec_hide_frac > 0)
-    pool = _MECHANISMS_MODULE_SCOPE if (module_scope and gen_safe and not exec_hide_possible) else _MECHANISMS
+    pool = _MECHANISMS_MODULE_SCOPE if (module_scope and not exec_hide_possible) else _MECHANISMS
     if n + n_decoys > _LARGE_BRANCH_THRESHOLD:
         mechanism = "match_case"
     elif mechanism is None:
         mechanism = rng.choice(pool)
-    elif mechanism == "generator_frame" and not (module_scope and gen_safe and not exec_hide_possible):
+    elif mechanism == "generator_frame" and not (module_scope and not exec_hide_possible):
         mechanism = rng.choice(_MECHANISMS)  # caller-requested but unsafe here
 
     if mechanism == "generator_frame":
@@ -528,6 +541,124 @@ def _has_unbound_break_continue(node: ast.stmt) -> bool:
     return walk(node, False)
 
 
+class _BreakContinueRewriter:
+    """
+    Rewrites break/continue that target a given loop into sentinel-flag
+    assignments, with guard statements inserted at every nesting level
+    in between.
+
+    Sentinel name & values are drawn from the same
+    random_confusable_name/_tok_value/_tok_expr machinery the dispatch
+    mechanisms themselves already use.
+    """
+
+    def __init__(self, flag: str, normal_expr: str, break_expr: str, cont_expr: str):
+        self.flag = flag
+        self.normal_expr = normal_expr
+        self.break_expr = break_expr
+        self.cont_expr = cont_expr
+
+    def _assign(self, value_expr: str) -> ast.stmt:
+        node = ast.parse(f"{self.flag} = {value_expr}").body[0]
+        return node
+
+    def _guard(self, stmts: list[ast.stmt]) -> ast.stmt:
+        test = ast.parse(f"{self.flag} == {self.normal_expr}", mode="eval").body
+        node = ast.If(test=test, body=stmts, orelse=[])
+        return node
+
+    def rewrite_stmt_list(self, stmts: list[ast.stmt]) -> list[ast.stmt]:
+        """Process a sequential list of statements and convert any direct
+        break/continue and, once a statement is found that could have
+        set the flag, wrap everything after it in a single "if flag == normal:" guard."""
+        out: list[ast.stmt] = []
+        for i, stmt in enumerate(stmts):
+            out.append(self._rewrite_stmt(stmt))
+            if _has_unbound_break_continue(stmt):
+                rest = stmts[i + 1:]
+                if rest:
+                    out.append(self._guard(self.rewrite_stmt_list(rest)))
+                break
+        return out
+
+    def _rewrite_stmt(self, stmt: ast.stmt) -> ast.stmt:
+        if isinstance(stmt, ast.Break):
+            return self._assign(self.break_expr)
+        if isinstance(stmt, ast.Continue):
+            return self._assign(self.cont_expr)
+        if isinstance(stmt, ast.If):
+            return ast.If(
+                test=stmt.test,
+                body=self.rewrite_stmt_list(stmt.body),
+                orelse=self.rewrite_stmt_list(stmt.orelse) if stmt.orelse else [],
+            )
+        if isinstance(stmt, ast.Try) or (hasattr(ast, "TryStar") and isinstance(stmt, ast.TryStar)):
+            new_handlers = [
+                ast.ExceptHandler(type=h.type, name=h.name, body=self.rewrite_stmt_list(h.body))
+                for h in stmt.handlers
+            ]
+            return type(stmt)(
+                body=self.rewrite_stmt_list(stmt.body),
+                handlers=new_handlers,
+                orelse=self.rewrite_stmt_list(stmt.orelse) if stmt.orelse else [],
+                finalbody=self.rewrite_stmt_list(stmt.finalbody) if stmt.finalbody else [],
+            )
+        if isinstance(stmt, (ast.With, ast.AsyncWith)):
+            return type(stmt)(items=stmt.items, body=self.rewrite_stmt_list(stmt.body))
+        # For/AsyncFor/While/FunctionDef/AsyncFunctionDef/ClassDef: their
+        # own break/continue (if any) already correctly targets
+        # themselves (loops) or was already invalid (defs) -> leave
+        # completely untouched.
+        return stmt
+
+
+def _try_flag_rewrite_loop(node: ast.stmt, rng: random.Random, used_names: set):
+    """
+    Attempt sentinel-flag rewrite for a For/AsyncFor/While node
+    whose body _has_unbound_break_continue. On success, returns
+    (fresh_node, fresh_src_lines, flag, break_expr)
+
+    Returns None if the rewrite doesn't apply, or on ANY failure along
+    the way.
+    """
+    if not isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+        return None
+    if not any(_has_unbound_break_continue(s) for s in node.body):
+        return None
+    try:
+        used_local: set = set()
+        flag = random_confusable_name(rng, used_local, length=rng.randint(8, 13))
+        normal_v, break_v, cont_v = (_tok_value(rng) for _ in range(3))
+        normal_e, break_e, cont_e = (_tok_expr(v, rng) for v in (normal_v, break_v, cont_v))
+
+        rewriter = _BreakContinueRewriter(flag, normal_e, break_e, cont_e)
+        new_body = rewriter.rewrite_stmt_list(list(node.body))
+
+        reset = ast.parse(f"{flag} = {normal_e}").body[0]
+        full_body = [reset] + new_body  # NOT + [trailing] -> see docstring
+
+        if isinstance(node, ast.While):
+            new_node: ast.stmt = ast.While(test=node.test, body=full_body, orelse=[])
+        elif isinstance(node, ast.AsyncFor):
+            new_node = ast.AsyncFor(target=node.target, iter=node.iter, body=full_body,
+                                     orelse=[], type_comment=None)
+        else:
+            new_node = ast.For(target=node.target, iter=node.iter, body=full_body,
+                                orelse=[], type_comment=None)
+
+        ast.fix_missing_locations(new_node)
+        new_src = ast.unparse(new_node)
+        compile(new_src, "<flag_rewrite_check>", "exec")
+
+        fresh_tree = ast.parse(new_src)
+        fresh_node = fresh_tree.body[0]
+        if any(_has_unbound_break_continue(s) for s in fresh_node.body):
+            return None  # didn't eliminate the hazard; bail safely
+        return fresh_node, new_src.split("\n"), flag, break_e
+    except Exception:
+        return None
+
+
 def _suite_lists(node: ast.stmt):
     if isinstance(node, (ast.If,)):
         if node.body:
@@ -581,6 +712,51 @@ def _flatten_stmt(
     if depth >= max_depth or not isinstance(node, _COMPOUND_TYPES):
         return full
 
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+        rewrite_result = _try_flag_rewrite_loop(node, rng, used_names)
+        if rewrite_result is not None:
+            fresh_node, fresh_src_lines, flag, break_e = rewrite_result
+            orig_indent = _line_indent(src_lines[node.lineno - 1])
+            inner_lines = _flatten_compound(
+                fresh_node, fresh_src_lines, rng, used_names,
+                min_stmts, base_decoys, depth, max_depth, module_scope,
+            )
+            body_indent = "    "
+            for l in inner_lines[1:]:
+                if l.strip():
+                    body_indent = _line_indent(l)
+                    break
+            trailing = [f"{body_indent}if {flag} == {break_e}:", f"{body_indent}    break"]
+            rewritten_part = [orig_indent + l if l.strip() else l for l in (inner_lines + trailing)]
+
+            if node.orelse:
+                orelse_lines = _process_suite(
+                    node.orelse, src_lines, rng, used_names, min_stmts, base_decoys,
+                    depth + 1, max_depth, module_scope,
+                )
+                rewritten_part = rewritten_part + [f"{orig_indent}else:"] + orelse_lines
+
+            return rewritten_part
+
+    return _flatten_compound(node, src_lines, rng, used_names, min_stmts, base_decoys, depth, max_depth, module_scope)
+
+
+def _flatten_compound(
+    node: ast.stmt,
+    src_lines: list[str],
+    rng: random.Random,
+    used_names: set,
+    min_stmts: int,
+    base_decoys: int,
+    depth: int,
+    max_depth: int,
+    module_scope: bool,
+) -> list[str]:
+    """The normal (no break/continue rewrite involved) recursive
+    descent into a compound statement's nested suites. Factored out of
+    _flatten_stmt so the rewrite path above can call it directly on an
+    already-rewritten node without re-triggering the rewrite check."""
+    full = _slice(src_lines, node)
     child_scope = module_scope and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
 
     local = list(full)
