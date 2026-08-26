@@ -104,30 +104,46 @@ def _renameable(name: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _Collector(ast.NodeVisitor):
-    def __init__(self, pool: _NamePool):
+    def __init__(self, pool: _NamePool, preserve_toplevel: bool = False):
         self._pool = pool
         self._in_class = 0        # depth (inside a class body, skip method names)
         self._class_body_depth = 0  # >0 only while directly at class-body statement
                                      # level (not inside a nested method/function) --
                                      # see visit_Name for why this matters
+        self._func_depth = 0        # depth inside function/method bodies -> used
+                                     # together with _in_class to detect "true"
+                                     # module top-level
+        self._preserve_toplevel = preserve_toplevel
+        # preserve_toplevel: when True, names bound directly at module scope
+        # are never registered for renaming -> they keep their original spelling. 
+        # This is required for module_mode (gnolly.package /
+        # gnolly.wheel), name mangling them would break the public API of an otherwise-normal importable package.
+        # Everything else (locals, nested functions, method internals) is still mangled.
+
+    def _at_toplevel(self) -> bool:
+        return self._func_depth == 0 and self._in_class == 0
 
     def _reg(self, name: str):
         if _renameable(name):
             self._pool.get(name)
 
     def visit_FunctionDef(self, node):
-        # Register function name only if NOT inside a class body
-        if self._in_class == 0:
+        # Register function name only if NOT inside a class body, and (when
+        # preserve_toplevel is on) not a true module-level def either.
+        if self._in_class == 0 and not (self._preserve_toplevel and self._at_toplevel()):
             self._reg(node.name)
         saved = self._class_body_depth
         self._class_body_depth = 0
+        self._func_depth += 1
         self.generic_visit(node)
+        self._func_depth -= 1
         self._class_body_depth = saved
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_ClassDef(self, node):
-        self._reg(node.name)
+        if not (self._preserve_toplevel and self._at_toplevel()):
+            self._reg(node.name)
         self._in_class += 1
         self._class_body_depth += 1
         self.generic_visit(node)
@@ -137,6 +153,8 @@ class _Collector(ast.NodeVisitor):
     def visit_Name(self, node):
         if isinstance(node.ctx, ast.Store):
             if self._class_body_depth > 0:
+                return
+            if self._preserve_toplevel and self._at_toplevel():
                 return
             self._reg(node.id)
 
@@ -782,15 +800,21 @@ def obfuscate_source(
     obf_imports:   bool = True,
     inject_dead:   bool = True,
     flatten_flow:  bool = True,
+    preserve_toplevel: bool = False,
 ) -> str:
     """
     Apply all obfuscation passes to source.
     Returns valid Python source that compiles and executes identically to the original.
+
+    preserve_toplevel : when True, names bound directly at module scope are
+        never renamed -> required for module_mode (see gnolly.package /
+        gnolly.wheel), where these names are the public API a real importer
+        does `from mod import name` against. (one shouldn't have to do from abcd... instead of from mod...)
     """
     tree = ast.parse(source)
 
     pool = _NamePool()
-    _Collector(pool).visit(tree)
+    _Collector(pool, preserve_toplevel=preserve_toplevel).visit(tree)
 
     xfm = _Transformer(pool,
                         obf_strings, obf_constants, obf_imports,
