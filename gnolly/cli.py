@@ -4,7 +4,8 @@ gnolly -> Python code protection. Free with no paywalls.
 
 Commands:
     protect          Protect a single .py file
-    protect-package  Protect an entire package directory
+    protect-dir      Protect an entire directory
+    protect-wheel    Protect a package and build a real .whl
     keygen           Generate a standalone keyfile
 """
 from __future__ import annotations
@@ -90,9 +91,9 @@ def cmd_protect(args):
     print(f"           python {out.name}")
 
 
-# ── protect-package ───────────────────────────────────────────────────────────
+# ── protect-dir ───────────────────────────────────────────────────────────
 
-def cmd_protect_package(args):
+def cmd_protect_dir(args):
     from gnolly.package import protect_package_with_key
     from gnolly.keymanager import key_to_hex
 
@@ -134,6 +135,56 @@ def cmd_protect_package(args):
     print(f"           python <protected_file>.gnolly.py")
 
 
+# ── protect-wheel ───────────────────────────────────────────────────────────
+
+def cmd_protect_wheel(args):
+    from gnolly.wheel import build_wheel
+    from gnolly.keymanager import key_to_hex
+
+    inp = Path(args.input)
+    if not inp.exists() or not inp.is_dir():
+        sys.exit(f"[gnolly] Directory not found: {inp}")
+
+    out_dir = Path(args.output) if args.output else Path("dist")
+
+    # Resolve machine binding (same logic as cmd_protect)
+    _machine_fp = None
+    if getattr(args, 'bind_fp', None):
+        from gnolly.binding import fingerprint_from_hex
+        _machine_fp = fingerprint_from_hex(args.bind_fp)
+        print(f"[gnolly] Binding to fingerprint: {args.bind_fp[:16]}...")
+    elif getattr(args, 'bind', False):
+        from gnolly.binding import collect_fingerprint, fingerprint_hex
+        _machine_fp = collect_fingerprint()
+        if _machine_fp is None:
+            sys.exit("[gnolly] Could not collect machine fingerprint on this platform.")
+        print(f"[gnolly] Binding to THIS machine: {fingerprint_hex()[:16]}...")
+
+    wheel_path, key, kf = build_wheel(
+        input_dir           = inp,
+        output_dir          = out_dir,
+        name                = args.name,
+        version             = args.version,
+        description         = args.description,
+        author              = args.author or "",
+        requires_dist       = args.requires or None,
+        bundle_runtime      = args.bundle_runtime,
+        keyfile             = args.keyfile or None,
+        exclude             = args.exclude,
+        verbose             = True,
+        mangle_names        = not args.no_mangle,
+        obf_strings         = not args.no_strings,
+        inject_dead         = not args.no_dead,
+        obf_numbers         = not args.no_numbers,
+        machine_fingerprint = _machine_fp,
+        flatten             = not args.no_flatten,
+        minify              = not args.no_minify,
+        pack                = not args.no_pack,
+    )
+    print(f"\n[gnolly] Wheel:   {wheel_path}")
+    print(f"[gnolly] Install: pip install {wheel_path}")
+
+
 # ── Argument parser ───────────────────────────────────────────────────────────
 
 def _add_obf_flags(p):
@@ -172,12 +223,29 @@ def build_parser():
     pp.add_argument("output", nargs="?", help="Output (default: <input>.gnolly.py)")
     _add_obf_flags(pp)
 
-    # protect-package
-    pkg = sub.add_parser("protect-package", help="Protect an entire package directory")
+    # protect-dir
+    pkg = sub.add_parser("protect-dir", help="Protect an entire directory of files")
     pkg.add_argument("input",  help="Package directory")
     pkg.add_argument("output", nargs="?", help="Output directory (default: <input>_protected)")
     pkg.add_argument("--exclude", nargs="*", default=[], help="Glob patterns to exclude")
     _add_obf_flags(pkg)
+
+    # protect-wheel
+    whl = sub.add_parser("protect-wheel", help="Protect a package and build a real .whl")
+    whl.add_argument("input", help="Package directory (must contain __init__.py)")
+    whl.add_argument("output", nargs="?", help="Output directory for the .whl (default: dist/)")
+    whl.add_argument("--name", required=True, help="Distribution name (e.g. mypkg)")
+    whl.add_argument("--version", required=True, help="PEP 440 version, e.g. 1.0.0")
+    whl.add_argument("--description", default="", help="Short summary for METADATA")
+    whl.add_argument("--author", default="", help="Author name for METADATA")
+    whl.add_argument("--requires", nargs="*", default=[],
+                      help="Extra Requires-Dist entries (e.g. requests>=2.0)")
+    whl.add_argument("--bundle-runtime", action="store_true", dest="bundle_runtime",
+                      help="Embed the built gnolly .so runtime in the wheel "
+                           "(self-contained, but platform/ABI-specific). "
+                           "Default: depend on a separately pip-installed gnolly.")
+    whl.add_argument("--exclude", nargs="*", default=[], help="Glob patterns to exclude")
+    _add_obf_flags(whl)
 
     # keygen
     kg = sub.add_parser("keygen", help="Generate a key")
@@ -205,8 +273,10 @@ def main():
     args = p.parse_args()
     if args.command == "protect":
         cmd_protect(args)
-    elif args.command == "protect-package":
-        cmd_protect_package(args)
+    elif args.command == "protect-dir":
+        cmd_protect_dir(args)
+    elif args.command == "protect-wheel":
+        cmd_protect_wheel(args)
     elif args.command == "keygen":
         cmd_keygen(args)
     elif args.command == "fingerprint":
