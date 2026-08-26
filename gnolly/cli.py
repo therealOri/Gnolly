@@ -167,6 +167,7 @@ def cmd_protect_wheel(args):
         version             = args.version,
         description         = args.description,
         author              = args.author or "",
+        python_requires     = args.python_requires,
         requires_dist       = args.requires or None,
         bundle_runtime      = args.bundle_runtime,
         keyfile             = args.keyfile or None,
@@ -240,6 +241,8 @@ def build_parser():
     whl.add_argument("--author", default="", help="Author name for METADATA")
     whl.add_argument("--requires", nargs="*", default=[],
                       help="Extra Requires-Dist entries (e.g. requests>=2.0)")
+    whl.add_argument("--python-requires", default=">=3.12", dest="python_requires",
+                      help="Requires-Python constraint for METADATA (default: >=3.12)")
     whl.add_argument("--bundle-runtime", action="store_true", dest="bundle_runtime",
                       help="Embed the built gnolly .so runtime in the wheel "
                            "(self-contained, but platform/ABI-specific). "
