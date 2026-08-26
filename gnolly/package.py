@@ -6,9 +6,9 @@ Multi-file / package protection.
 Protects an entire Python package directory, producing a self-contained
 output directory with:
 
-  - One protected .gnolly.py file per .py source file
+  - One protected .gnly.py file per .py source file
   - A single shared keyfile (all files in a package use the same key)
-  - A generated __init__.gnolly.py that re-exports the package interface
+  - A generated __init__.gnly.py that re-exports the package interface
   - A thin launcher script for executable packages (if __main__.py exists)
 
 Layout example
@@ -24,13 +24,21 @@ Input:
 
 Output:
     myapp_protected/
-        __init__.gnolly.py      <-  protected loader
-        __main__.gnolly.py
-        utils.gnolly.py
+        __init__.gnly.py      <-  protected loader
+        __main__.gnly.py
+        utils.gnly.py
         core/
-            __init__.gnolly.py
-            engine.gnolly.py
-        gnolly.key              <-  single key for all files
+            __init__.gnly.py
+            engine.gnly.py
+        gnly.key              <-  single key for all files
+
+With module_mode=True, output files keep their
+original names instead of the .gnolly.py suffix, and are generated as real
+importable modules -> the result is a normal, pip install-able Python
+package rather than a set of standalone scripts. gnolly.wheel.build_wheel
+uses this to produce an actual .whl. The plain .gnolly.py layout above
+remains the default and is unchanged for direct copy-alongside deployment.
+
 """
 from __future__ import annotations
 import sys
@@ -48,6 +56,7 @@ def protect_package(
     pattern: str = "**/*.py",
     exclude: list[str] | None = None,
     verbose: bool = False,
+    module_mode: bool = False,
     **protect_kwargs,
 ) -> dict[str, Path]:
     """
@@ -61,6 +70,17 @@ def protect_package(
     pattern       : glob pattern to select files (default: all .py files)
     exclude       : list of glob patterns to exclude (e.g. ['**/test_*.py'])
     verbose       : print progress
+    module_mode   : when False (default, unchanged behavior): every output
+                     file is protected and named <stem>.gnly.py, marking it as a
+                     protected copy meant to be dropped alongside the
+                     original or ran directly.
+                     When True: output files keep their ORIGINAL names
+                     (utils.py stays utils.py, __init__.py stays
+                     __init__.py) and are generated with the stub's
+                     "importable module" execution feature (see
+                     pipeline.protect's module_mode) -> the result is a
+                     real and normal importable Python package.
+    
     protect_kwargs: forwarded to protect() (mangle_names, obf_strings, etc.)
 
     Returns
@@ -93,7 +113,12 @@ def protect_package(
 
         # Compute relative path and output path
         rel = src_path.relative_to(input_dir)
-        out_path = output_dir / rel.with_suffix(".gnolly.py")
+        if module_mode:
+            # Keep the real filename -> the output is a normal importable
+            # package (pip install-able where `import mypkg.sub` works).
+            out_path = output_dir / rel
+        else:
+            out_path = output_dir / rel.with_suffix(".gnly.py")
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         if verbose:
@@ -103,6 +128,7 @@ def protect_package(
             input_path  = src_path,
             output_path = out_path,
             password    = password,
+            module_mode = module_mode,
             **protect_kwargs,
         )
         results[str(src_path)] = out_path
@@ -123,7 +149,7 @@ def protect_package_with_key(
     High-level wrapper: protect a package, generating or loading a key.
 
     Generates a new random key unless *existing_key* or *keyfile* is given.
-    Saves the key to <output_dir>/gnolly.key.
+    Saves the key to <output_dir>/gnly.key.
 
     Returns
     -------
@@ -140,7 +166,7 @@ def protect_package_with_key(
     else:
         key = generate_key()
 
-    kf_path = output_dir / "gnolly.key"
+    kf_path = output_dir / "gnly.key"
     output_dir.mkdir(parents=True, exist_ok=True)
     save_keyfile(key, kf_path, protected_file=str(input_dir), hint=f"Key for {input_dir.name}")
 
