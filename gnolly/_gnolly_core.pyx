@@ -163,6 +163,7 @@ def gnolly_run(
     int header_skip,
     bytes alpha_bytes,
     bytes xor_key,
+    object caller_globals=None,
 ):
     """
     Full Gnolly runtime pipeline -> compiled to C.
@@ -175,6 +176,10 @@ def gnolly_run(
         <gir_blob>           shuffled GIR bytecode
         u32_BE(table_len)    reverse table length (128)
         <table_blob>         128-byte reverse opcode table
+
+    caller_globals : when provided (module_mode stubs, e.g. protected
+        package/wheel submodules), the decoded output executes directly into
+        a dict instead of throwaway namespace.
     """
     _anti_debug_c()
     if not _VM_LOADED:
@@ -227,13 +232,19 @@ def gnolly_run(
     # CPython's eval loop never runs on this code.
     # _gnolly_vm.vm_exec_module deserialises the GIR blob and runs it
     # through its own Cython stack machine.
-    cdef dict globs = {
-        '__name__':     '__main__',
-        '__builtins__': __builtins__,
-        '__doc__':      None,
-        '__package__':  None,
-        '__spec__':     None,
-    }
+    cdef dict globs
+    if caller_globals is not None:
+        globs = caller_globals
+        if '__builtins__' not in globs:
+            globs['__builtins__'] = __builtins__
+    else:
+        globs = {
+            '__name__':     '__main__',
+            '__builtins__': __builtins__,
+            '__doc__':      None,
+            '__package__':  None,
+            '__spec__':     None,
+        }
     _gvm_exec_module(gir_blob, table_blob, globs)
     gir_blob   = b''
     table_blob = b''
