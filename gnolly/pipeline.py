@@ -73,6 +73,7 @@ def protect(
     minify: bool = True,
     pack: bool = True,
     self_hash: bool = True,
+    module_mode: bool = False,
 ) -> str:
     """
     Parameters
@@ -114,6 +115,13 @@ def protect(
                       specifically need to inspect the readable
                       (flattened/minified) stub source, e.g. with
                       pack=False.
+    module_mode     : toggle "importable module" execution feature
+                      instead of "standalone script" feature -> the
+                      protected code executes into the stub's own
+                      globals() instead of a __main__ namespace. 
+                      This is used by gnolly.package / gnolly.wheel for package and wheel
+                      protection. Off by default (single-file "protect"
+                      behavior is unchanged).
     """
     def _log(msg: str) -> None:
         if verbose:
@@ -121,7 +129,7 @@ def protect(
 
     # Stage 1: AST obfuscation
     _log("Stage 1/5  AST obfuscation …")
-    obf_source = obfuscate_source(source) \
+    obf_source = obfuscate_source(source, preserve_toplevel=module_mode) \
         if (mangle_names or obf_strings or inject_dead or obf_numbers) \
         else source
 
@@ -204,6 +212,7 @@ def protect(
         flatten         = flatten,
         self_hash       = self_hash,
         will_be_packed  = pack,
+        module_mode     = module_mode,
     )
     if minify:
         _log("Minifying stub …")
