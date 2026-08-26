@@ -221,10 +221,10 @@ def build_wheel(
         # ── METADATA ──────────────────────────────────────────────────────
         req_dist = list(requires_dist or [])
         if not bundle_runtime and not any(
-            r.split()[0].split(";")[0].split("[")[0].strip().lower() == "gnly"
+            r.split()[0].split(";")[0].split("[")[0].strip().lower() == "gnolly"
             for r in req_dist
         ):
-            req_dist.append("gnly")
+            req_dist.append("gnolly")
 
         meta_lines = [
             "Metadata-Version: 2.1",
