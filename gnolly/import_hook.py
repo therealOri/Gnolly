@@ -11,10 +11,17 @@ The so_hash is verified before loading to prevent tampered .so injection. (will 
 
 Search order for _gnolly_core.so
 ---------------------------------
-1. Alongside the protected .py file     (most common deployment layout)
-2. ./gnolly/ relative to cwd            (running from project root)
-3. gnolly package path via sys.modules  (gnolly installed in env)
-4. sys.path scan for gnolly/            (fallback for non-standard layouts)
+1. Alongside this module's own __file__      (falls back to argv[0] if
+                                               __file__ isn't set, e.g. -c).
+                                               
+2. A bundled _gnolly_runtime/ dir next to this module's __file__, or one
+   level up (package root)                    (optional: only present when
+                                               a wheel was built with
+                                               bundle_runtime=True)
+3. ./gnolly/ relative to cwd                  (running from project root)
+4. gnolly package path via sys.modules        (gnolly installed in env)
+5. sys.path scan for gnolly/                  (fallback for non-standard
+                                               layouts)
 
 If not found: print a human-readable error and exit(1) instead of a
 silent failure.
@@ -63,10 +70,11 @@ def generate_import_hook_lines(
     vm_loader_call: str | None = None,
     h_blt: str | None = None,   # builtins module handle -> obfuscates None
     rng: random.Random | None = None,  # for single-char comprehension names
+    module_mode: bool = False,  # reserved for callers;
 ) -> tuple[list[str], str]:
     """
     Generate stub lines that:
-    1. Find <module_stem>.so via four search locations (see module docstring)
+    1. Find <module_stem>.so via search locations
     2. Verify its SHA-256 hash against an obfuscated expected value (cosmetic
        fast-fail only -> see the note above the hash-verification block)
     3. Load it via importlib.util.spec_from_file_location
@@ -120,9 +128,10 @@ def generate_import_hook_lines(
     v_sysmod  = N[90 + o]   # sys module handle
     v_item    = N[91 + o]   # loop variable
     v_cand    = N[92 + o]   # candidate path being tested
-    v_script  = N[93 + o]   # __file__ of the running stub
     v_hash_o  = N[95 + o]   # hash object (so we compute the digest only once)
     v_hash_rw = N[96 + o]   # computed hash value (raw digest bytes, for key folding)
+    v_myfile  = N[160 + o]  # this module's own __file__ (str or '')
+    v_mydir   = N[161 + o]  # Path(__file__).parent (or None)
 
     a(f"try:")
 
@@ -137,22 +146,35 @@ def generate_import_hook_lines(
     v_soname = N[94 + o]
     a(f"    {v_soname} = {enc(module_stem)} + {v_suffix}")
 
-    # ── search location 1: directory of the protected .py file ───────────────
-    # The most common layout: user places the .so right next to their script.
-    # __file__ is set to the stub's own path by CPython before execution.
+    # ── search location 1: directory of this module's own __file__ ───────────
     a(f"    {v_so} = " + sing("None"))
-    a(f"    {v_script} = getattr({v_sysmod}, {enc('argv')}, [''])[0]")
-    a(f"    if {v_script}:")
-    # Path(argv[0]).parent / soname  -> no resolve() needed, parent is a property
-    a(f"        {v_cand} = getattr({v_path}({v_script}), {enc('parent')}) / {v_soname}")
+    a(f"    {v_myfile} = globals().get({enc('__file__')}, '')")
+    a(f"    if not {v_myfile}:")
+    a(f"        {v_myfile} = getattr({v_sysmod}, {enc('argv')}, [''])[0]")
+    a(f"    {v_mydir} = " + sing("None"))
+    a(f"    if {v_myfile}:")
+    a(f"        {v_mydir} = getattr({v_path}({v_myfile}), {enc('parent')})")
+    a(f"        {v_cand} = {v_mydir} / {v_soname}")
     a(f"        if {em(v_cand, 'exists')}: {v_so} = {v_cand}")
 
-    # ── search location 2: ./gnolly/ relative to cwd ─────────────────────────
+    # ── search location 2: bundled _gnolly_runtime/ dir (optional) ───────────
+    # Only present when a wheel was built with bundle_runtime=True.
+    v_walk = N[163 + o]
+    a(f"    if {v_so} is " + sing("None") + " and " + v_mydir + " is not " + sing("None") + ":")
+    a(f"        {v_walk} = {v_mydir}")
+    a(f"        for {v_cand} in range({obn(6)}):")
+    a(f"            {v_cand} = {v_walk} / {enc('_gnolly_runtime')} / {v_soname}")
+    a(f"            if {em(v_cand, 'exists')}:")
+    a(f"                {v_so} = {v_cand}")
+    a(f"                break")
+    a(f"            {v_walk} = getattr({v_walk}, {enc('parent')})")
+
+    # ── search location 3: ./gnolly/ relative to cwd ─────────────────────────
     a(f"    if {v_so} is " + sing("None") + ":")
     a(f"        {v_cand} = {v_path}({enc('.')}) / {enc('gnolly')} / {v_soname}")
     a(f"        if {em(v_cand, 'exists')}: {v_so} = {v_cand}")
 
-    # ── search location 3: gnolly package dir via sys.modules ────────────────
+    # ── search location 4: gnolly package dir via sys.modules ────────────────
     a(f"    if {v_so} is " + sing("None") + ":")
     a(f"        if {enc('gnolly')} in getattr({v_sysmod}, {enc('modules')}):")
     # gnolly.__file__ points at __init__.py (a *file*), so the parent dir
@@ -163,7 +185,7 @@ def generate_import_hook_lines(
     a(f"            {v_cand} = getattr({v_path}(getattr(getattr({v_sysmod}, {enc('modules')})[{enc('gnolly')}], {enc('__file__')}, '')), {enc('parent')}) / {v_soname}")
     a(f"            if {em(v_cand, 'exists')}: {v_so} = {v_cand}")
 
-    # ── search location 4: scan sys.path for gnolly/ subdir ──────────────────
+    # ── search location 5: scan sys.path for gnolly/ subdir ──────────────────
     # next() over a generator expression instead of "for item in sys.path:
     # build candidate, check, break" -> no steppable loop body for a
     # debugger or quick skim to latch onto.
