@@ -119,9 +119,16 @@ def generate_stub(
     flatten: bool = True,
     self_hash: bool = True,
     will_be_packed: bool = False,
+    module_mode: bool = False,
 ) -> str:
+    """
+    module_mode : when True, the generated stub executes the protected
+        payload directly into its own globals() instead of a __main__-style namespace. 
+        This makes the stub behave like a normal importable module. 
+        Used by gnolly.package / gnolly.wheel for package and wheel protection.
+    """
     rng = random.SystemRandom()
-    N   = _gen_names(160)
+    N   = _gen_names(190)
 
     # String encoding key (different from payload xor_key)
     str_key  = _make_str_key()
@@ -365,6 +372,7 @@ def generate_stub(
             n_offset=0,
             h_blt=h_blt,
             rng=rng,
+            module_mode=module_mode,
         )
         for _hl in _hook_lines:
             a(_hl)
@@ -387,6 +395,7 @@ def generate_stub(
             vm_loader_call=_vm_loader_var,
             h_blt=h_blt,
             rng=rng,
+            module_mode=module_mode,
         )
         for _hl in _vm_hook_lines:
             a(_hl)
@@ -405,7 +414,15 @@ def generate_stub(
         # gnolly_run will hard-exit if _VM_LOADED is somehow still False.
         a(f"{cr_var}({sm_data}, {sm_key},")
         a(f"    {b_fn}({salt_enc}), {b_fn}({iv_enc}), {b_fn}({tag_enc}),")
-        a(f"    {obn(blob_header_skip)}, {b_fn}({alp_enc}), {b_fn}({xk_enc}))")
+        if module_mode:
+            # Execute directly into this module's own globals() so the functions/classes the protected source defines
+            # end up in the real module __dict__ and relative imports between protected sibling modules resolve normally. 
+            # Note: stub-internal helper names (decoder lambdas, module handles, etc.) remain
+            # visible in the module's namespace afterward -> they don't collide with real names and don't affect behavior, but "dir()"
+            # on the module will show them alongside the real API.
+            a(f"    {obn(blob_header_skip)}, {b_fn}({alp_enc}), {b_fn}({xk_enc}), globals())")
+        else:
+            a(f"    {obn(blob_header_skip)}, {b_fn}({alp_enc}), {b_fn}({xk_enc}))")
     else:
         # One or both .so files not built at protect-time -> fail at runtime
         _exit_s = _enc_str(chr(115)+chr(121)+chr(115), str_key)
