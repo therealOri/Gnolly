@@ -1,6 +1,6 @@
 # How to use
 > [!IMPORTANT]
-> 1. Because this will protect every .py file it can in your specified dir and in sub-directories, execution time may very and or be slower because of the very nature of obfuscation. More files protected = more files that need to run their course. Which means it may take longer to run code and import, etc.
+> 1. Because this will protect every .py file it can in your specified dir and in sub-directories, execution time may vary and or be slower because of the very nature of obfuscation. More files protected = more files that need to run their course. Which means it may take longer to run code and import, etc.
 >
 > 2. If you do NOT `export GNOLLY_KEY=1234567890` (set it as an env var python can access/use), on import it will ask you to paste said key and THEN it will run.
 > This may have unintended side affects or bugs depending on how many imports it'll do. (WIP)
