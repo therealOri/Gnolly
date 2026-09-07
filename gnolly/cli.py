@@ -84,6 +84,8 @@ def cmd_protect(args):
         flatten             = not args.no_flatten,
         minify              = not args.no_minify,
         pack                = not args.no_pack,
+        bogus_hierarchy     = not args.no_hierarchy,
+        alias_exprs         = not args.no_alias,
     )
     print(f"\n[gnolly] Done -> {out}")
     print(f"[gnolly] Runtime:")
@@ -129,6 +131,8 @@ def cmd_protect_dir(args):
         flatten             = not args.no_flatten,
         minify              = not args.no_minify,
         pack                = not args.no_pack,
+        bogus_hierarchy     = not args.no_hierarchy,
+        alias_exprs         = not args.no_alias,
     )
     print(f"\n[gnolly] Runtime:")
     print(f"           export GNOLLY_KEY={key_to_hex(key)}")
@@ -181,6 +185,8 @@ def cmd_protect_wheel(args):
         flatten             = not args.no_flatten,
         minify              = not args.no_minify,
         pack                = not args.no_pack,
+        bogus_hierarchy     = not args.no_hierarchy,
+        alias_exprs         = not args.no_alias,
     )
     print(f"\n[gnolly] Wheel:   {wheel_path}")
     print(f"[gnolly] Install: pip install {wheel_path}")
@@ -197,6 +203,13 @@ def _add_obf_flags(p):
     p.add_argument("--no-numbers", action="store_true", help="Disable integer obfuscation")
     p.add_argument("--no-flatten", action="store_true",
                    help="Disable control-flow flattening of the generated stub")
+    p.add_argument("--no-hierarchy", action="store_true",
+                   help="Disable bogus inherited class hierarchy generation "
+                        "(also used to diversify the opaque-True token used "
+                        "by dead-code/flatten/noise passes)")
+    p.add_argument("--no-alias", action="store_true",
+                   help="Disable expression aliasing (routing call results "
+                        "through an extra layer of indirection)")
     p.add_argument("--no-minify", action="store_true",
                    help="Disable minification of the protected output (on by default)")
     p.add_argument("--no-pack", action="store_true",
