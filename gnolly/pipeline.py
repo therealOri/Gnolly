@@ -74,6 +74,8 @@ def protect(
     pack: bool = True,
     self_hash: bool = True,
     module_mode: bool = False,
+    bogus_hierarchy: bool = True,
+    alias_exprs: bool = True,
 ) -> str:
     """
     Parameters
@@ -118,10 +120,15 @@ def protect(
     module_mode     : toggle "importable module" execution feature
                       instead of "standalone script" feature -> the
                       protected code executes into the stub's own
-                      globals() instead of a __main__ namespace. 
+                      globals() instead of a __main__ namespace.
                       This is used by gnolly.package / gnolly.wheel for package and wheel
                       protection. Off by default (single-file "protect"
                       behavior is unchanged).
+    bogus_hierarchy : toggle AST-level fake inherited class hierarchy
+                      and also diversify the opaque-True tokens used in AST
+                      obfuscation passes. On by default.
+    alias_exprs     : toggle AST-level expression aliasing -> call results are randomly
+                      routed through one or more layer(s) of indirection.
     """
     def _log(msg: str) -> None:
         if verbose:
@@ -129,7 +136,9 @@ def protect(
 
     # Stage 1: AST obfuscation
     _log("Stage 1/5  AST obfuscation …")
-    obf_source = obfuscate_source(source, preserve_toplevel=module_mode) \
+    obf_source = obfuscate_source(source, preserve_toplevel=module_mode,
+                                   bogus_hierarchy=bogus_hierarchy,
+                                   alias_exprs=alias_exprs) \
         if (mangle_names or obf_strings or inject_dead or obf_numbers) \
         else source
 
