@@ -66,7 +66,7 @@ def vm_exec_module(blob: bytes, table_blob: bytes, globs: dict | None = None) ->
     Parameters
     ----------
     blob:       Encrypted+shuffled GIR bytes (output of vm_pipeline.protect_with_vm).
-    table_blob: 128-byte reverse opcode table (index=shuffled -> value=GIR id).
+    table_blob: 256-byte reverse opcode table (index=shuffled -> value=GIR id).
     globs:      Module-level "__dict__"; created fresh if None.
 
     This function is the only public entry point for protected module execution.
