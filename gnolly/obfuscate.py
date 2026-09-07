@@ -12,6 +12,9 @@ Multi-pass AST obfuscation pipeline.
   Pass 7  Dead code injection — inert stmts scattered through bodies
   Pass 8  Docstring removal
   Pass 9  Polymorphic noise  — unique per-run junk at module top
+  Pass 10 Hierarchy + aliasing — bogus class hierarchy (also
+                      diversifies the opaque-True token used by passes
+                      6/7/9) + per-call expression aliasing
 
 What is and isn't renamed
 --------------------------
@@ -115,7 +118,7 @@ class _Collector(ast.NodeVisitor):
                                      # module top-level
         self._preserve_toplevel = preserve_toplevel
         # preserve_toplevel: when True, names bound directly at module scope
-        # are never registered for renaming -> they keep their original spelling. 
+        # are never registered for renaming -> they keep their original spelling.
         # This is required for module_mode (gnolly.package /
         # gnolly.wheel), name mangling them would break the public API of an otherwise-normal importable package.
         # Everything else (locals, nested functions, method internals) is still mangled.
@@ -425,7 +428,8 @@ def _obf_import_from(node: ast.ImportFrom, pool: _NamePool, key: bytes, dec_gett
 # Pass 6 -> Control-flow flattening (state-machine dispatch)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random, bi_getter, enc_fn) -> list[ast.stmt]:
+def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random, bi_getter, enc_fn,
+             true_fn=None) -> list[ast.stmt]:
     """
     Flatten a function body into a while-True dispatch loop.
     Skip if body has fewer than 3 stmts or no branching:  not worth it.
@@ -498,13 +502,14 @@ def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random, bi_gette
         targets=[ast.Name(id=sv, ctx=ast.Store())],
         value=ast.Constant(value=states[0]),
         lineno=1, col_offset=0)
-    loop   = ast.While(
-        test=ast.Call(
+    if true_fn is not None:
+        loop_test = true_fn()
+    else:
+        loop_test = ast.Call(
             func=ast.Name(id="getattr", ctx=ast.Load()),
             args=[ast.Name(id=bi_getter(), ctx=ast.Load()), enc_fn("True")],
-            keywords=[]),
-        body=[root_if],
-        orelse=[])
+            keywords=[])
+    loop   = ast.While(test=loop_test, body=[root_if], orelse=[])
 
     return [init, loop]
 
@@ -513,10 +518,9 @@ def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random, bi_gette
 # Pass 7 -> Dead code helpers
 # ─────────────────────────────────────────────────────────────────────────────
 # > Room for improvemnt here
-def _dead(bi_getter, enc_fn) -> ast.stmt:
+def _dead(bi_getter, enc_fn, true_fn=None) -> ast.stmt:
     """bi_getter: see _noise() -> routes True/False here through the same
-    getattr(builtins, "...") obfuscation as everywhere else.
-    enc_fn: see _flatten() -> keyed string encoding for "True"/"False"."""
+    getattr(builtins, "...") obfuscation as everywhere else."""
     def _t(name):
         return ast.Call(
             func=ast.Name(id="getattr", ctx=ast.Load()),
@@ -526,7 +530,7 @@ def _dead(bi_getter, enc_fn) -> ast.stmt:
     if c == 0:
         return ast.While(test=_t("False"), body=[ast.Pass()], orelse=[])
     elif c == 1:
-        return ast.Assert(test=_t("True"), msg=None)
+        return ast.Assert(test=(true_fn() if true_fn is not None else _t("True")), msg=None)
     elif c == 2:
         a = secrets.randbelow(0xFF)
         b = secrets.randbelow(0xFF) + 0x100
@@ -543,10 +547,89 @@ def _dead(bi_getter, enc_fn) -> ast.stmt:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Pass 10 -> Bogus class hierarchies + expression aliasing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_hierarchy(pool: _NamePool, rng: random.Random, bi_getter, enc_fn) -> tuple[list[ast.stmt], str, str]:
+    """
+    Builds a short chain of fake classes (2-4 levels deep, each deriving
+    from the previous one), giving each a couple of inert methods and an
+    opaque-int class attribute, then instantiate the deepest class once.
+    """
+    depth = rng.randint(2, 4)
+    class_names = [pool.fresh() for _ in range(depth)]
+    stmts: list[ast.stmt] = []
+    prev: str | None = None
+
+    for cname in class_names:
+        bases = [ast.Name(id=prev, ctx=ast.Load())] if prev else []
+        body: list[ast.stmt] = []
+        for _ in range(rng.randint(1, 2)):
+            mname = pool.fresh()
+            body.append(ast.FunctionDef(
+                name=mname,
+                args=ast.arguments(posonlyargs=[], args=[ast.arg(arg="self")],
+                                    vararg=None, kwonlyargs=[], kw_defaults=[],
+                                    kwarg=None, defaults=[]),
+                body=[_dead(bi_getter, enc_fn), ast.Return(value=ast.Constant(value=None))],
+                decorator_list=[]))
+        aname = pool.fresh()
+        body.append(ast.Assign(
+            targets=[ast.Name(id=aname, ctx=ast.Store())],
+            value=_bool_int_ast(secrets.randbelow(0xFFFF) + 1, rng),
+            lineno=1, col_offset=0))
+        stmts.append(ast.ClassDef(name=cname, bases=bases, keywords=[],
+                                   body=body, decorator_list=[]))
+        prev = cname
+
+    inst_name = pool.fresh()
+    stmts.append(ast.Assign(
+        targets=[ast.Name(id=inst_name, ctx=ast.Store())],
+        value=ast.Call(func=ast.Name(id=class_names[-1], ctx=ast.Load()),
+                        args=[], keywords=[]),
+        lineno=1, col_offset=0))
+    return stmts, inst_name, class_names[0]
+
+
+def _class_alias_ast(value: ast.expr, pool: _NamePool, rng: random.Random,
+                      base_name: str, label_expr: ast.expr) -> ast.expr:
+    """
+    Stash an already-computed value as a class attribute for a
+    class minted with a type(), deriving from the bogus hierarchy's base code,
+    then read it straight back via attribute access.
+    """
+    attr = pool.fresh()
+    ns = ast.Dict(keys=[ast.Constant(value=attr)], values=[value])
+    type_call = ast.Call(
+        func=ast.Name(id="type", ctx=ast.Load()),
+        args=[label_expr,
+              ast.Tuple(elts=[ast.Name(id=base_name, ctx=ast.Load())], ctx=ast.Load()),
+              ns],
+        keywords=[])
+    return ast.Attribute(value=type_call, attr=attr, ctx=ast.Load())
+
+
+def _lambda_alias_ast(value: ast.expr, param: str) -> ast.expr:
+    """a value tucked away as a default argument, read back by name"""
+    lam = ast.Lambda(
+        args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=param)], vararg=None,
+                            kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[value]),
+        body=ast.Name(id=param, ctx=ast.Load()))
+    return ast.Call(func=lam, args=[], keywords=[])
+
+
+def _dict_alias_ast(value: ast.expr, decoy: ast.expr, true_expr: ast.expr) -> ast.expr:
+    """a value hidden behind a {True: ..., False: ...}[opaque_true] pick."""
+    d = ast.Dict(keys=[ast.Constant(value=True), ast.Constant(value=False)],
+                 values=[value, decoy])
+    return ast.Subscript(value=d, slice=true_expr, ctx=ast.Load())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Pass 9 -> Polymorphic module-level noise
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _noise(pool: _NamePool, count: int, bi_getter, enc_fn) -> list[ast.stmt]:
+def _noise(pool: _NamePool, count: int, bi_getter, enc_fn, true_fn=None) -> list[ast.stmt]:
     """
     bi_getter: zero-arg callable returning the name of the (lazily
     created) local builtins handle -> lets the True/False used here go
@@ -573,10 +656,13 @@ def _noise(pool: _NamePool, count: int, bi_getter, enc_fn) -> list[ast.stmt]:
                 ast.Delete(targets=[ast.Name(id=tmp, ctx=ast.Del())]),
             ]
         elif c == 1:
-            true_expr = ast.Call(
-                func=ast.Name(id="getattr", ctx=ast.Load()),
-                args=[ast.Name(id=bi_getter(), ctx=ast.Load()), enc_fn("True")],
-                keywords=[])
+            if true_fn is not None:
+                true_expr = true_fn()
+            else:
+                true_expr = ast.Call(
+                    func=ast.Name(id="getattr", ctx=ast.Load()),
+                    args=[ast.Name(id=bi_getter(), ctx=ast.Load()), enc_fn("True")],
+                    keywords=[])
             stmts.append(ast.Assert(test=true_expr, msg=None))
         else:
             false_expr = ast.Call(
@@ -593,9 +679,15 @@ def _noise(pool: _NamePool, count: int, bi_getter, enc_fn) -> list[ast.stmt]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _Transformer(ast.NodeTransformer):
+    # Probability that a given Call node's result gets threaded through
+    # one more layer of expression-aliasing indirection. 
+    # This runs on every call site, so values higher will balloon the output size fast for little marginal benefit.
+    _ALIAS_CALL_P = 0.08
+
     def __init__(self, pool: _NamePool,
                  obf_strings, obf_constants, obf_imports,
-                 inject_dead, flatten_flow):
+                 inject_dead, flatten_flow,
+                 bogus_hierarchy: bool = True, alias_exprs: bool = True):
         self._pool         = pool
         self._rng          = random.SystemRandom()
         self._obf_str      = obf_strings
@@ -603,12 +695,16 @@ class _Transformer(ast.NodeTransformer):
         self._obf_imp      = obf_imports
         self._dead         = inject_dead
         self._flatten      = flatten_flow
+        self._bogus_hier   = bogus_hierarchy
+        self._alias        = alias_exprs
         self._fstr_depth   = 0
         self._pattern_depth = 0  # track whether we're inside a match-case pattern
         self._class_depth  = 0   # track whether we're inside a class
         self._bi_var       = None  # lazily-created builtins module handle used to obfuscate None/True/False (see _singleton() and visit_Module)
         self._str_key      = secrets.token_bytes(16)  # per-module XOR key for string/bytes encoding
         self._dec_var      = None  # lazily-created per-module string decoder function (see _dec()/_enc() and visit_Module)
+        self._hier_stmts   = None  # lazily-built bogus class hierarchy (see _hier())
+        self._hier_names   = None  # (instance_name, base_class_name) once built
 
     def _bi(self) -> str:
         """Name of the (lazily created) local builtins module handle."""
@@ -626,6 +722,61 @@ class _Transformer(ast.NodeTransformer):
         """Encode a string the same keyed way as _enc_str, bound to this
         transformer's own key/decoder."""
         return _enc_str(s, self._str_key, self._dec)
+
+    def _hier(self) -> tuple[str, str]:
+        """Lazily build the module's bogus class hierarchy and return (instance_name, base_class_name)."""
+        if self._hier_names is None:
+            stmts, inst_name, base_name = _build_hierarchy(
+                self._pool, self._rng, self._bi, self._enc)
+            self._hier_stmts = stmts
+            self._hier_names = (inst_name, base_name)
+        return self._hier_names
+
+    def _true_expr(self) -> ast.expr:
+        """A syntactically-varied, semantically-guaranteed-True expression.
+        This diversifies the "opaque true" token used across _flatten's loop
+        guard, _dead's assert, and _noise -> instead of one fixed
+        getattr(builtins, "True") shape repeating identically at every
+        site."""
+        styles = [0, 2]
+        if self._bogus_hier:
+            styles.append(1)
+        style = self._rng.choice(styles)
+        if style == 0:
+            return ast.Call(
+                func=ast.Name(id="getattr", ctx=ast.Load()),
+                args=[ast.Name(id=self._bi(), ctx=ast.Load()), self._enc("True")],
+                keywords=[])
+        elif style == 1:
+            inst, base = self._hier()
+            return ast.Call(
+                func=ast.Name(id="isinstance", ctx=ast.Load()),
+                args=[ast.Name(id=inst, ctx=ast.Load()), ast.Name(id=base, ctx=ast.Load())],
+                keywords=[])
+        else:
+            n = secrets.randbelow(0xFFFF) + 1
+            left  = _render_int_ast(n, self._rng, expensive_ok=True)
+            right = _render_int_ast(n, self._rng, expensive_ok=True)
+            return ast.Compare(left=left, ops=[ast.Eq()], comparators=[right])
+
+    def _alias_wrap(self, node: ast.expr) -> ast.expr:
+        """Thread an already-transformed expression through one more
+        layer of indirection, chosen at random."""
+        styles = [1, 2]
+        if self._bogus_hier:
+            styles.append(0)
+        style = self._rng.choice(styles)
+        if style == 0:
+            _, base = self._hier()
+            label = self._enc(self._pool.fresh())
+            wrapped = _class_alias_ast(node, self._pool, self._rng, base, label)
+        elif style == 1:
+            p = self._pool.fresh()
+            wrapped = _lambda_alias_ast(node, p)
+        else:
+            decoy = _bool_int_ast(secrets.randbelow(0xFFFF) + 1, self._rng)
+            wrapped = _dict_alias_ast(node, decoy, self._true_expr())
+        return ast.copy_location(wrapped, node)
 
     def _singleton(self, name: str, node: ast.AST) -> ast.expr:
         return ast.copy_location(
@@ -649,7 +800,7 @@ class _Transformer(ast.NodeTransformer):
         for stmt in body:
             out.append(stmt)
             if self._rng.random() < 0.35:
-                out.append(_dead(self._bi, self._enc))
+                out.append(_dead(self._bi, self._enc, true_fn=self._true_expr))
         return out
 
     # Module
@@ -657,7 +808,7 @@ class _Transformer(ast.NodeTransformer):
         node.body = self._strip_doc(node.body)
         self.generic_visit(node)
         cnt = self._rng.randint(2, 5)
-        noise_stmts = _noise(self._pool, cnt, self._bi, self._enc)
+        noise_stmts = _noise(self._pool, cnt, self._bi, self._enc, true_fn=self._true_expr)
         preamble = []
         if self._dec_var is not None:
             preamble.append(_make_decoder_def(self._dec_var, self._str_key))
@@ -667,6 +818,9 @@ class _Transformer(ast.NodeTransformer):
                 value=ast.Call(
                     func=_hidden_import_call_ast(self._str_key, self._dec),
                     args=[self._enc("builtins")], keywords=[])))
+
+        if self._hier_stmts is not None:
+            preamble.extend(self._hier_stmts)
         node.body = preamble + noise_stmts + node.body
         return node
 
@@ -687,11 +841,21 @@ class _Transformer(ast.NodeTransformer):
         node.body = self._strip_doc(node.body)
         self.generic_visit(node)
         if self._flatten:
-            node.body = _flatten(node.body, self._pool, self._rng, self._bi, self._enc)
+            node.body = _flatten(node.body, self._pool, self._rng, self._bi, self._enc,
+                                  true_fn=self._true_expr)
         node.body = self._scatter_dead(node.body)
         return node
 
     visit_AsyncFunctionDef = visit_FunctionDef
+
+    # Calls -> expression aliasing (Pass 10). Runs after generic_visit has
+    # already transformed this call's children (func/args/keywords), so
+    # nested calls get wrapped innermost-first, making sure we only wrap a call site once.
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if self._alias and self._rng.random() < self._ALIAS_CALL_P:
+            return self._alias_wrap(node)
+        return node
 
     # Names
     def visit_Name(self, node):
@@ -760,7 +924,8 @@ class _Transformer(ast.NodeTransformer):
                 case.guard = self.visit(case.guard)
             case.body = [self.visit(stmt) for stmt in case.body]
             if self._flatten:
-                case.body = _flatten(case.body, self._pool, self._rng, self._bi, self._enc)
+                case.body = _flatten(case.body, self._pool, self._rng, self._bi, self._enc,
+                                      true_fn=self._true_expr)
             case.body = self._scatter_dead(case.body)
         return node
 
@@ -801,6 +966,8 @@ def obfuscate_source(
     inject_dead:   bool = True,
     flatten_flow:  bool = True,
     preserve_toplevel: bool = False,
+    bogus_hierarchy: bool = True,
+    alias_exprs:   bool = True,
 ) -> str:
     """
     Apply all obfuscation passes to source.
@@ -810,6 +977,11 @@ def obfuscate_source(
         never renamed -> required for module_mode (see gnolly.package /
         gnolly.wheel), where these names are the public API a real importer
         does `from mod import name` against. (one shouldn't have to do from abcd... instead of from mod...)
+    bogus_hierarchy : toggle Pass 10's fake inherited class hierarchy,
+        used both as a standalone decoy and as an extra always-True
+        source pattern.
+    alias_exprs     : toggle Pass 10's expression aliasing -> call results
+        get randomly threaded through one or more extra layer(s) of indirection.
     """
     tree = ast.parse(source)
 
@@ -818,7 +990,8 @@ def obfuscate_source(
 
     xfm = _Transformer(pool,
                         obf_strings, obf_constants, obf_imports,
-                        inject_dead, flatten_flow)
+                        inject_dead, flatten_flow,
+                        bogus_hierarchy=bogus_hierarchy, alias_exprs=alias_exprs)
     new_tree = xfm.visit(tree)
     ast.fix_missing_locations(new_tree)
     return ast.unparse(new_tree)
