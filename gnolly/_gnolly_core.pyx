@@ -32,8 +32,8 @@ Payload layout (after decrypt + decompress)
   u32_BE(gir_len)       GIR blob length
   <gir_blob>            shuffled GIR bytecode (per-file opcode permutation,
                          see vm_translate.py / vm_serialize.py)
-  u32_BE(table_len)     reverse opcode table length (always 128)
-  <table_blob>          128-byte reverse opcode table for the GIR shuffle
+  u32_BE(table_len)     reverse opcode table length (always 256)
+  <table_blob>          256-byte reverse opcode table for the GIR shuffle
 """
 
 import struct
@@ -174,8 +174,8 @@ def gnolly_run(
         b'\\x01'              VM-mode flag
         u32_BE(gir_len)      GIR blob length
         <gir_blob>           shuffled GIR bytecode
-        u32_BE(table_len)    reverse table length (128)
-        <table_blob>         128-byte reverse opcode table
+        u32_BE(table_len)    reverse table length (256)
+        <table_blob>         256-byte reverse opcode table
 
     caller_globals : when provided (module_mode stubs, e.g. protected
         package/wheel submodules), the decoded output executes directly into
