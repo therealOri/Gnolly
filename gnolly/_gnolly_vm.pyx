@@ -9,8 +9,8 @@ This is the "custom C eval loop" half of the true-VM feature.  It:
 
   1. Deserialises the custom GIR binary format (see gnolly.vm_serialize)
      directly from bytes -> no marshal call anywhere.
-  2. Un-shuffles each instruction's opcode byte using the per-file
-     256-entry reverse table (see gnolly.vm_isa).
+  2. Un-shuffles each instruction's opcode value using the per-file
+     65536-entry (16-bit) reverse table (see gnolly.vm_isa).
   3. Interprets the resulting GIR instruction stream with its own
      stack machine, re-implementing CPython's documented bytecode
      semantics using CPython's C-API (via Cython) for every operation.
@@ -32,7 +32,8 @@ import collections.abc as _abc_mod
 
 # GIR_TABLE_SIZE must match gnolly.vm_isa.GIR_TABLE_SIZE exactly.
 # (protect-time and runtime must agree on the reverse-table size).
-cdef int GIR_TABLE_SIZE = 256
+cdef int GIR_TABLE_SIZE = 65536
+cdef int GIR_FORMAT_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +211,12 @@ def _read_code(_Reader r, dict table):
 
     cdef unsigned long long n_instr = r.read_uvarint()
     cdef list instructions = []
-    cdef unsigned char shuffled_op
+    cdef unsigned long long shuffled_op
     cdef int real_op
     cdef unsigned long long arg
     cdef unsigned long long i
     for i in range(n_instr):
-        shuffled_op = r.read_u8()
+        shuffled_op = r.read_uvarint()
         real_op = table.get(shuffled_op, shuffled_op)
         arg = r.read_uvarint()
         instructions.append((real_op, <long long>arg))
@@ -254,14 +255,22 @@ def deserialize_vm_blob(bytes blob, bytes table_blob):
     """
     Deserialise a GIR module blob.
 
-    table_blob: GIR_TABLE_SIZE-byte reverse opcode table
-                (index = shuffled opcode byte -> value = real GIR opcode).
+    table_blob: 2*GIR_TABLE_SIZE-byte reverse opcode table, big-endian u16
+                pairs (index = shuffled opcode value -> value = real GIR
+                opcode).
     """
-    if len(table_blob) < GIR_TABLE_SIZE:
+    if len(table_blob) < GIR_TABLE_SIZE * 2:
         raise ValueError("vm opcode table too short")
-    cdef dict table = {i: table_blob[i] for i in range(GIR_TABLE_SIZE)}
+    cdef dict table = {}
+    cdef Py_ssize_t ti
+    for ti in range(GIR_TABLE_SIZE):
+        table[ti] = (table_blob[2 * ti] << 8) | table_blob[2 * ti + 1]
     if not blob:
         raise ValueError("empty GIR blob")
+    if blob[0] != GIR_FORMAT_VERSION:
+        raise ValueError(
+            "unsupported GIR format version %d (expected %d)" % (blob[0], GIR_FORMAT_VERSION)
+        )
     cdef _Reader r = _Reader(blob, 1)   # skip format-version byte
     return _read_code(r, table)
 
