@@ -10,7 +10,7 @@ This is the "custom C eval loop" half of the true-VM feature.  It:
   1. Deserialises the custom GIR binary format (see gnolly.vm_serialize)
      directly from bytes -> no marshal call anywhere.
   2. Un-shuffles each instruction's opcode byte using the per-file
-     128-entry reverse table (see gnolly.vm_isa).
+     256-entry reverse table (see gnolly.vm_isa).
   3. Interprets the resulting GIR instruction stream with its own
      stack machine, re-implementing CPython's documented bytecode
      semantics using CPython's C-API (via Cython) for every operation.
@@ -32,7 +32,7 @@ import collections.abc as _abc_mod
 
 # GIR_TABLE_SIZE must match gnolly.vm_isa.GIR_TABLE_SIZE exactly.
 # (protect-time and runtime must agree on the reverse-table size).
-cdef int GIR_TABLE_SIZE = 128
+cdef int GIR_TABLE_SIZE = 256
 
 
 # ---------------------------------------------------------------------------
