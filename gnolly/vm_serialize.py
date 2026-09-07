@@ -37,7 +37,7 @@ stored as constants of `kind == K_CODE`):
     strvec  cellvars
     constvec consts
     varint  n_instr
-    n_instr * (u8 shuffled_opcode, varint operand)
+    n_instr * (varint shuffled_opcode, varint operand)
     varint  n_exc
     n_exc   * (varint start, varint end, varint target, varint depth, u8 lasti)
     varint  n_lines
@@ -298,7 +298,7 @@ def _write_code(out: bytearray, code: GIRCode) -> None:
     for op, arg in code.instructions:
         if not (0 <= op < GIR_TABLE_SIZE):
             raise ValueError(f"GIR opcode {op} out of range 0..{GIR_TABLE_SIZE - 1}")
-        out.append(op)
+        write_uvarint(out, op)
         write_uvarint(out, arg)
 
     write_uvarint(out, len(code.exc_table))
@@ -342,7 +342,7 @@ def _read_code(buf: bytes, pos: int) -> tuple[GIRCode, int]:
     n_instr, pos = read_uvarint(buf, pos)
     instructions = []
     for _ in range(n_instr):
-        op = buf[pos]; pos += 1
+        op, pos = read_uvarint(buf, pos)
         arg, pos = read_uvarint(buf, pos)
         instructions.append((op, arg))
 
