@@ -13,8 +13,8 @@ This is the foundation of the "opcode remapping VM":
     stream -> there is only a custom binary blob (see gnolly.vm_serialize).
   * The 0-102 internal GIR opcode numbers are additionally shuffled
     per-file via a SHAKE-256 + Fisher-Yates permutation over the full
-    256-entry byte space. The reverse
-    table travels with the encrypted payload.
+    65536-entry (16-bit) value space (see GIR_TABLE_SIZE below). The
+    reverse table travels with the encrypted payload.
   * Execution happens entirely inside a custom Cython interpreter
     ("gnolly._gnolly_vm") that walks the GIR instruction stream and
     re-implements each operation using CPython's C-API.  CPython's own
@@ -190,20 +190,21 @@ GIR_JUMP_OPS = frozenset({
 # ---------------------------------------------------------------------------
 # Per-file opcode permutation (GIR opcode space)
 # ---------------------------------------------------------------------------
-# SHAKE-256 + Fisher-Yates over a *256*-entry space -> the full range of a
-# single byte. GIR itself only defines ~103 real opcodes (0..GIR_OP_COUNT-1);
-# every remaining slot in the table is a decoy/invalid entry that a real
+# SHAKE-256 + Fisher-Yates over a *65536*-entry space (a full 16-bit range).
+# GIR itself only defines ~103 real opcodes (0..GIR_OP_COUNT-1); every
+# remaining slot in the table is a decoy/invalid entry that a real
 # instruction stream never emits. Those decoys still round-trip through the
-# permutation and the serialized reverse table, so a reverse-engineer staring
-# at the 256-entry reverse table can't tell real opcode mappings from noise
-# without also recovering GIR_OPS itself.
+# permutation and the serialized reverse table, so a reverse-engineer
+# staring at the reverse table can't tell real opcode mappings from noise
+# (65,433 decoy slots vs 103 real ones) without also recovering GIR_OPS
+# itself.
 #
 # NOTE: this constant must be mirrored exactly in gnolly._gnolly_vm
 # (GIR_TABLE_SIZE at the top of _gnolly_vm.pyx) -> protect-time and
 # runtime must always agree on the table size, so bumping this requires
 # rebuilding the Cython extension.
 
-GIR_TABLE_SIZE = 256
+GIR_TABLE_SIZE = 65536
 
 
 def build_vm_shuffle_table(key: bytes) -> tuple[dict[int, int], dict[int, int]]:
@@ -211,14 +212,15 @@ def build_vm_shuffle_table(key: bytes) -> tuple[dict[int, int], dict[int, int]]:
     Derive a stable GIR_TABLE_SIZE-entry bijection from *key*.
 
     Returns (forward, reverse):
-      forward[gir_opcode]      -> shuffled byte written to the stream
-      reverse[shuffled_byte]   -> gir_opcode (used by the interpreter)
+      forward[gir_opcode]      -> shuffled value written to the stream
+      reverse[shuffled_value]  -> gir_opcode (used by the interpreter)
     """
-    stream = bytearray(hashlib.shake_256(b"gnolly-vm-opcode:" + key).digest(512))
+    n_bytes = 2 * GIR_TABLE_SIZE
+    stream = hashlib.shake_256(b"gnolly-vm-opcode:" + key).digest(n_bytes)
     perm = list(range(GIR_TABLE_SIZE))
     idx = 0
     for i in range(GIR_TABLE_SIZE - 1, 0, -1):
-        word = struct.unpack_from(">H", stream, idx % (len(stream) - 1))[0]
+        word = struct.unpack_from(">H", stream, idx)[0]
         idx += 2
         j = word % (i + 1)
         perm[i], perm[j] = perm[j], perm[i]
@@ -228,8 +230,13 @@ def build_vm_shuffle_table(key: bytes) -> tuple[dict[int, int], dict[int, int]]:
 
 
 def serialise_vm_table(reverse: dict[int, int]) -> bytes:
-    """GIR_TABLE_SIZE-byte reverse table: index = shuffled byte -> value = GIR opcode."""
-    return bytes(reverse[i] for i in range(GIR_TABLE_SIZE))
+    """
+    2*GIR_TABLE_SIZE-byte reverse table: big-endian u16 pairs,
+    index = shuffled value -> value = GIR opcode.
+    """
+    out = bytearray(2 * GIR_TABLE_SIZE)
+    struct.pack_into(f">{GIR_TABLE_SIZE}H", out, 0, *(reverse[i] for i in range(GIR_TABLE_SIZE)))
+    return bytes(out)
 
 
 # ---------------------------------------------------------------------------
