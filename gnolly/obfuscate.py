@@ -307,12 +307,43 @@ def _enc_str(s: str, key: bytes, dec_getter) -> ast.expr:
                      args=[list_expr], keywords=[])
 
 def _enc_int(n: int) -> ast.expr:
+    """
+    Encode an int as one of the exact arithmetic identities below over two
+    rendered constants.
+
+        xor    : (n ^ k) ^ k
+        add    : (n - k) + k
+        muldiv : (n * m) // m          (m != 0, division is exact here)
+        shift  : (n << s) >> s         (arithmetic shift round-trips)
+    """
     k = secrets.randbelow(0xFFFF) + 1
     rng = random.Random(secrets.randbits(64))
+    family = secrets.randbelow(4)
+    if family == 0:
+        return ast.BinOp(
+            left=_render_int_ast(n ^ k, rng, expensive_ok=True),
+            op=ast.BitXor(),
+            right=_render_int_ast(k, rng, expensive_ok=True))
+    if family == 1:
+        return ast.BinOp(
+            left=_render_int_ast(n - k, rng, expensive_ok=True),
+            op=ast.Add(),
+            right=_render_int_ast(k, rng, expensive_ok=True))
+    if family == 2:
+        m = secrets.randbelow(0xFE) + 2
+        return ast.BinOp(
+            left=_render_int_ast(n * m, rng, expensive_ok=True),
+            op=ast.FloorDiv(),
+            right=_render_int_ast(m, rng, expensive_ok=True))
+    s = secrets.randbelow(12) + 1
+    inner = ast.BinOp(
+        left=_render_int_ast(n, rng, expensive_ok=True),
+        op=ast.LShift(),
+        right=_render_int_ast(s, rng, expensive_ok=True))
     return ast.BinOp(
-        left=_render_int_ast(n ^ k, rng, expensive_ok=True),
-        op=ast.BitXor(),
-        right=_render_int_ast(k, rng, expensive_ok=True))
+        left=inner,
+        op=ast.RShift(),
+        right=_render_int_ast(s, rng, expensive_ok=True))
 
 def _enc_float(f: float, key: bytes, dec_getter) -> ast.expr:
     return ast.Call(
@@ -518,15 +549,49 @@ def _flatten(body: list[ast.stmt], pool: _NamePool, rng: random.Random, bi_gette
 # Pass 7 -> Dead code helpers
 # ─────────────────────────────────────────────────────────────────────────────
 # > Room for improvemnt here
-def _dead(bi_getter, enc_fn, true_fn=None) -> ast.stmt:
+def _empty_args() -> ast.arguments:
+    return ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[],
+                         kw_defaults=[], kwarg=None, defaults=[])
+
+
+def _dead(bi_getter, enc_fn, true_fn=None, fresh=None) -> ast.stmt:
     """bi_getter: see _noise() -> routes True/False here through the same
-    getattr(builtins, "...") obfuscation as everywhere else."""
+    getattr(builtins, "...") obfuscation as everywhere else.
+
+    fresh: optional and when supplied, four extra
+    decoy shapes become available. Without it only the
+    original four shapes are emitted."""
     def _t(name):
         return ast.Call(
             func=ast.Name(id="getattr", ctx=ast.Load()),
             args=[ast.Name(id=bi_getter(), ctx=ast.Load()), enc_fn(name)],
             keywords=[])
-    c = secrets.randbelow(4)
+    c = secrets.randbelow(4 if fresh is None else 8)
+    if c >= 4:
+        if c == 4:
+            a, b = secrets.randbelow(0xFFFF), secrets.randbelow(0xFFFF)
+            return ast.Assign(
+                targets=[ast.Name(id=fresh(), ctx=ast.Store())],
+                value=ast.Tuple(elts=[ast.Constant(value=a), ast.Constant(value=b)],
+                                ctx=ast.Load()),
+                lineno=1, col_offset=0)
+        if c == 5:
+            return ast.Assign(
+                targets=[ast.Name(id=fresh(), ctx=ast.Store())],
+                value=ast.Lambda(args=_empty_args(),
+                                 body=ast.Constant(value=secrets.randbelow(0xFFFF))),
+                lineno=1, col_offset=0)
+        if c == 6:
+            return ast.For(
+                target=ast.Name(id=fresh(), ctx=ast.Store()),
+                iter=ast.Tuple(elts=[], ctx=ast.Load()),
+                body=[ast.Pass()], orelse=[])
+        # c == 7: raise and immediately catch, both classes fetched via builtins
+        return ast.Try(
+            body=[ast.Raise(exc=_t("ValueError"), cause=None)],
+            handlers=[ast.ExceptHandler(type=_t("ValueError"), name=None,
+                                        body=[ast.Pass()])],
+            orelse=[], finalbody=[])
     if c == 0:
         return ast.While(test=_t("False"), body=[ast.Pass()], orelse=[])
     elif c == 1:
@@ -571,7 +636,8 @@ def _build_hierarchy(pool: _NamePool, rng: random.Random, bi_getter, enc_fn) -> 
                 args=ast.arguments(posonlyargs=[], args=[ast.arg(arg="self")],
                                     vararg=None, kwonlyargs=[], kw_defaults=[],
                                     kwarg=None, defaults=[]),
-                body=[_dead(bi_getter, enc_fn), ast.Return(value=ast.Constant(value=None))],
+                body=[_dead(bi_getter, enc_fn, fresh=pool.fresh),
+                      ast.Return(value=ast.Constant(value=None))],
                 decorator_list=[]))
         aname = pool.fresh()
         body.append(ast.Assign(
@@ -680,7 +746,7 @@ def _noise(pool: _NamePool, count: int, bi_getter, enc_fn, true_fn=None) -> list
 
 class _Transformer(ast.NodeTransformer):
     # Probability that a given Call node's result gets threaded through
-    # one more layer of expression-aliasing indirection. 
+    # one more layer of expression-aliasing indirection.
     # This runs on every call site, so values higher will balloon the output size fast for little marginal benefit.
     _ALIAS_CALL_P = 0.08
 
@@ -762,7 +828,7 @@ class _Transformer(ast.NodeTransformer):
     def _alias_wrap(self, node: ast.expr) -> ast.expr:
         """Thread an already-transformed expression through one more
         layer of indirection, chosen at random."""
-        styles = [1, 2]
+        styles = [1, 2, 3, 4]
         if self._bogus_hier:
             styles.append(0)
         style = self._rng.choice(styles)
@@ -773,9 +839,17 @@ class _Transformer(ast.NodeTransformer):
         elif style == 1:
             p = self._pool.fresh()
             wrapped = _lambda_alias_ast(node, p)
-        else:
+        elif style == 2:
             decoy = _bool_int_ast(secrets.randbelow(0xFFFF) + 1, self._rng)
             wrapped = _dict_alias_ast(node, decoy, self._true_expr())
+        elif style == 3:
+            decoy = _bool_int_ast(secrets.randbelow(0xFFFF) + 1, self._rng)
+            wrapped = ast.Subscript(
+                value=ast.Tuple(elts=[decoy, node], ctx=ast.Load()),
+                slice=self._true_expr(), ctx=ast.Load())
+        else:
+            decoy = _bool_int_ast(secrets.randbelow(0xFFFF) + 1, self._rng)
+            wrapped = ast.IfExp(test=self._true_expr(), body=node, orelse=decoy)
         return ast.copy_location(wrapped, node)
 
     def _singleton(self, name: str, node: ast.AST) -> ast.expr:
@@ -800,7 +874,8 @@ class _Transformer(ast.NodeTransformer):
         for stmt in body:
             out.append(stmt)
             if self._rng.random() < 0.35:
-                out.append(_dead(self._bi, self._enc, true_fn=self._true_expr))
+                out.append(_dead(self._bi, self._enc, true_fn=self._true_expr,
+                                 fresh=self._pool.fresh))
         return out
 
     # Module
