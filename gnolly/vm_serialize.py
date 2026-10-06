@@ -385,18 +385,3 @@ def serialize_module(code: GIRCode) -> bytes:
     out.append(FORMAT_VERSION)
     _write_code(out, code)
     return bytes(out)
-
-
-# For gnolly.verify testing
-def deserialize_module(blob: bytes) -> GIRCode:
-    """
-    Inverse of serialize_module.
-    Pure-Python reference implementation used for testing the production path deserialing inside the Cython interpreter directly from the shuffled opcode stream.
-    """
-    if not blob:
-        raise ValueError("empty GIR blob")
-    version = blob[0]
-    if version != FORMAT_VERSION:
-        raise ValueError(f"unsupported GIR format version {version}")
-    code, pos = _read_code(blob, 1)
-    return code
