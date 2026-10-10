@@ -16,7 +16,7 @@ __ __
 
 # Gnolly
 
-**Professional Python code protection. Free, open-source, no paywalls.**
+**Python code protection that's free, open-source, and with no paywalls.**
 
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://python.org)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
