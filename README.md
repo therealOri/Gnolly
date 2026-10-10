@@ -35,37 +35,48 @@ Gnolly encrypts, compresses, and obfuscates your Python source so that only some
 __ __
 
 > [!IMPORTANT]
-> The gnolly VM protection currently supports python 3.12 versions. I will work on supporting 3.13+ at a later time. (or you can help too by making a pull request)
-
+> The gnolly VM protection is built and tested against Python 3.12. I will work on supporting 3.13+ at a later time. (or you can help too by making a pull request)
+>
+> I also have not tested anything out on windows systems yet, so be aware that idk if it works well on windows or not.
 
 <br>
 
 ## What Gnolly does
 
-When you protect a file, Gnolly runs your code through five stages:
+When you protect a file, Gnolly runs your code through seven stages:
 
 ```
 your_script.py
     │
-    ├─ [1] AST obfuscation      —   name mangling, string hex-encoding,
-    │                               integer XOR expressions, dead-code injection,
-    │                               docstring removal
+    ├─ [1] AST obfuscation      —   name mangling, keyed string/bytes/float encoding
+    │                               (multiple independently-rolled encoding dialects),
+    │                               multi-family integer encoding (XOR / additive /
+    │                               mul-div / shift identities), dead-code and decoy-
+    │                               structure injection, bogus class hierarchies,
+    │                               expression aliasing, docstring removal
     │
     ├─ [2] GIR VM translation   —   source -> Gnolly Intermediate Representation
-    │                               (a custom bytecode format; CPython opcodes
+    │                               (custom bytecode format; CPython opcodes
     │                               never exist at runtime)
     │
-    ├─ [3] Compression          —   zlib / lzma / bz2, best result is used
+    ├─ [3] VM opcode shuffle    —   per-file permutation over the full 65536-entry
+    │                               (16-bit) GIR opcode space
     │
-    ├─ [4] Encryption           —   AES-256-GCM + PBKDF2-HMAC-SHA256
+    ├─ [4] Compression          —   zlib / lzma / bz2, best result is used
+    │
+    ├─ [5] Encryption           —   AES-256-GCM + PBKDF2-HMAC-SHA256
     │                               (600,000 iterations, random salt+IV per file)
     │
-    └─ [5] Stub generation      —   fully obfuscated loader script
+    ├─ [6] Custom encoding      —   per-file alphabet keyed from password + random
+    │                               salt, unique every run
+    │
+    └─ [7] Stub generation      —   control-flow-flattened, minified, packed,
+              │                     self-hash-verified, obfuscated loader script
               │
               └─ your_script.gnolly.py   <-  distribute this
 ```
 
-The output is a standalone `.py` that asks for a key before running. No source text, no readable bytecode, no embedded key. Two compiled C extensions (`_gnolly_core.so` for decryption, `_gnolly_vm.so` for execution) perform all of the work in native machine code. **Both are required at runtime.**
+The output is a standalone `.py` that asks for a key before running. No source text, no readable bytecode, no embedded key. Two compiled C extensions (`_gnolly_core.so` for decryption & core functionality, `_gnolly_vm.so` for execution) perform all of the work in native machine code. **Both are required at runtime.**
 
 ### True VM protection
 
@@ -208,25 +219,49 @@ gnolly protect <input.py> [output.py] [options]
 
   -K, --keyfile FILE      Use an existing keyfile instead of generating a new one
   --no-mangle             Skip AST name mangling
-  --no-strings            Skip string literal hex-encoding
-  --no-dead               Skip dead-code injection
-  --no-numbers            Skip integer XOR obfuscation
+  --no-strings            Skip string/bytes/float encoding
+  --no-dead               Skip dead-code and decoy-structure injection
+  --no-numbers            Skip integer encoding
+  --no-flatten            Skip control-flow flattening of the generated stub
+  --no-hierarchy          Skip bogus inherited class hierarchy / opaque-token diversification
+  --no-alias              Skip AST-level expression aliasing
+  --no-minify             Skip stub minification
+  --no-pack               Skip the final compression pass (ship the readable stub instead)
   --bind                  Bind output to THIS machine (uses current fingerprint)
   --bind-fp HEX           Bind to a specific machine fingerprint (from 'gnolly fingerprint')
   -v, --verbose           Show pipeline progress
   --verbose-errors        Emit error messages from the stub on failure (dev only)
 ```
 
-### `gnolly protect-package`
+### `gnolly protect-dir`
 
-Protect an entire package directory, recursively.
+Protect an entire directory of files, recursively.
 
 ```
-gnolly protect-package <input_dir> [output_dir] [options]
+gnolly protect-dir <input_dir> [output_dir] [options]
 
   --exclude GLOB [...]    Glob patterns to skip (e.g. "tests/*" "*.pyi")
   (all protect options above also apply)
 ```
+
+### `gnolly protect-wheel`
+
+Protect a package and build a real, installable `.whl`.
+
+```
+gnolly protect-wheel <input_dir> [output_dir] --name NAME --version VERSION [options]
+
+  --name NAME               Distribution name (e.g. mypkg)
+  --version VERSION         PEP 440 version, e.g. 1.0.0
+  --description TEXT        Short summary for METADATA
+  --author TEXT              Author name for METADATA
+  --requires PKG [...]       Runtime dependencies to declare
+  --python-requires SPEC    Requires-Python constraint (default: >=3.12)
+  --bundle-runtime          Embed the matching .so pair in the wheel itself
+  --exclude GLOB [...]      Glob patterns to skip
+  (all protect options above also apply)
+```
+> The protected package is importable like any normal package; protected modules execute into their own `__dict__` rather than a `__main__` namespace.
 
 ### `gnolly keygen`
 
@@ -289,13 +324,23 @@ protect(
     obf_strings: bool = True,
     inject_dead: bool = True,
     obf_numbers: bool = True,
+    inject_junk: bool = True,
     machine_fingerprint: bytes | None = None,
     verbose: bool = False,
     silent: bool = True,
+    flatten: bool = True,
+    minify: bool = True,
+    pack: bool = True,
+    self_hash: bool = True,
+    module_mode: bool = False,
+    bogus_hierarchy: bool = True,
+    alias_exprs: bool = True,
 ) -> str
 ```
 
-> Every call to `protect()` (and every underlying obfuscation/encoding step) is fully non-deterministic by design -- there is no seed, fixed or otherwise, anywhere in the pipeline, internal or CLI-exposed. Two calls with identical `source`/`password` always produce different output.
+> `inject_junk` toggles GIR-level junk instruction injection (after compilation, alongside the translated bytecode), separate from the AST-level `inject_dead`. `module_mode` makes the protected code execute into the stub's own `globals()` instead of a `__main__` namespace. This is what `protect-dir`/`protect-wheel` use internally for package protection. `self_hash=False` is the one you want if you need to inspect a readable stub (combine with `pack=False`).
+
+> Every call to `protect()` (and every underlying obfuscation/encoding step) is fully non-deterministic by design. There is no seed, fixed or otherwise, anywhere in the pipeline, internal or CLI-exposed. Two calls with identical `source`/`password` should produce different output.
 
 ---
 
@@ -344,13 +389,21 @@ This composes with the `.so` integrity binding described [above](#versioning-the
 | Anti-debug (C layer) | A second independent sweep runs inside the compiled `.so` after the stub's checks |
 | Slow-execution debugger detection | Two independent bounded-loop timing checks flag single-stepping/heavy tracing overhead (complements the existing too-fast/replay timing gate); see `gnolly/antidebug.py` |
 | Stub self-hash | The shipped stub verifies its own exact source text against an embedded digest via several independently-placed, differently-shaped checks at startup -> reformatting, patching, or beautifying the file for easier reading breaks it. See `gnolly/selfhash.py`. Always on when protecting via the CLI. Library callers can pass `self_hash=False` to `gnolly.pipeline.protect()` (e.g. alongside `pack=False`) if they need to inspect the readable stub source. |
+| Control-flow flattening | The generated stub is rewritten into an opaque dispatch-loop state machine with multiple dispatch mechanisms, rather than its natural top-to-bottom control flow. See `gnolly/flatten.py`. |
+| Bogus class hierarchy | AST-level fake inherited class hierarchies, plus diversified opaque-"True" tokens reused across the obfuscation passes so no single token is a reliable tell. On by default. |
+| Expression aliasing | Call results are randomly routed through one of several indirection shapes (lambda wrapper, dict/tuple lookup, conditional expression, fake-class alias) before use, so the same call doesn't always look the same. |
+| Multi-dialect string/number encoding | String, bytes, and float literals are rendered via one of several independently-applicable encoding dialects, re-rolled per literal; integers are rendered via one of several exact arithmetic identities (XOR, additive, mul-div, bit-shift), also re-rolled per literal. A decoder written against one instance won't match the next. See `gnolly/strcodec.py` and `gnolly/obfuscate.py`. |
+| Decoy-structure injection | Dead code is injected in multiple structurally distinct shapes (unreachable branches, unused bindings, dead lambdas, never-iterated loops, raise/catch pairs) rather than one repeated pattern, so the decoys themselves don't become a fingerprint. |
+| Minification + packing | The flattened stub is minified (`gnolly/minify.py`) and the final output is replaced with a tiny bootstrap plus one opaque compressed blob (`gnolly/pack.py`), collapsing the visible, readable surface of the shipped file. |
+| Importable package / wheel protection | `gnolly protect-dir` and `gnolly protect-wheel` protect an entire package recursively and can emit a real, installable `.whl`; protected modules execute into their own module `__dict__` via `module_mode`, so normal `import` semantics keep working. |
+| Import-hook-based hiding | Select internal helper logic is hidden behind a synthetic `sys.meta_path` Finder/Loader instead of an inline `exec()`'d blob, so it looks like an ordinary import rather than code being unpacked and run at the call site. See `gnolly/modhide.py`. |
 
 ### What Gnolly does NOT do
 
 - **Gnolly is not DRM.** A determined adversary with your key and a C-level debugger (e.g. gdb attached to the Python process) can reconstruct logic by instrumenting the runtime at the C level. Code protection raises the cost and effort of reverse engineering; it does not make it theoretically impossible. 
 - Gnolly does not prevent inspection of process memory at runtime. (yet)
-- Gnolly does not enforce expiry dates, seat counts, or call home.
-> I plan on improving anti-debug and anti-tamper as well as general security hardening eventually. At this point, I can only make things harder :).
+- Gnolly does not enforce expiry dates, seat counts, or call home. This was explored and deliberately dropped: no software-only scheme on untrusted hardware can be made truly unbypassable, and PyArmor's own expiry is just a locally clock-checked file.
+> Python-source obfuscation (flatten, self-hash, modhide, antidebug) raises the cost of casual/automated attacks a lot, but a patient, skilled attacker gets through it eventually, the interpreter has to be able to run the real logic somewhere. See [What's next](#whats-next) for where more work is planned.
 __ __
 
 <br>
@@ -375,6 +428,8 @@ __ __
 | **Output is a .py file** | ✅ | ✅ | ❌ (.so) | ❌ | ❌ |
 | **Machine binding** | ✅ | ✅ Pro | ❌ | ❌ | ❌ |
 | **Tamper detection** | ✅ GCM tag + SHA-256 .so hash | ✅ | ❌ | ❌ | ❌ |
+| **Package / wheel protection** | ✅ `protect-dir` + real `.whl` output | ✅ | Partial (compiles, doesn't encrypt) | ✅ (standalone binary) | ❌ (no protection) |
+| **Control-flow flattening** | ✅ (stub-level, multiple dispatch mechanisms) | ✅ | ❌ | ❌ | ❌ |
 
 ### Key differences
 
@@ -395,10 +450,25 @@ __ __
 
 <br>
 
-## Running tests
+## What's next
 
-```bash
-pip install pytest
-python -m pytest tests/ -v
-```
-__ __
+A hardening roadmap for defending against a serious and a more patient kind of attacker (not just casual/automated reverse engineering).
+
+Python-source obfuscation -> everything currently in `flatten.py`, `selfhash.py`, `modhide.py`, `antidebug.py` raises the cost of casual and automated attacks a lot, but a patient, and skilled attacker will get through all of it eventually, since the interpreter has to be able to run the real logic somewhere. The techniques that actually matter against this tier of attacker live mostly at the `.so` / runtime-memory layer.
+
+| Progress | Technique | Layer | Effort | Value vs. serious attacker |
+|---|---|---|---|---|
+| ⏳ | Delayed / decorrelated failure reaction | Python | Low | High |
+| ⏳ | ptrace self-attach | `.so` (Linux) | Low | High |
+| ⏳ | Argon2id key derivation | `.so` / crypto | Low-Med | Medium |
+| ⏳ | Extra Python trigger primitives (`weakref`, `atexit`, `__del__`, frame inspection) | Python | Low | Medium |
+| ⏳ | Continuous (not just startup) integrity checks | Python + `.so` | Medium | High |
+| ⏳ | Cross-checking checks | Python | Medium | Medium-High |
+| ⏳ | Explicit buffer wiping after decrypt | `.so` | Medium | High |
+| ⏳ | aeskeyfind-class mitigation | `.so` | High | High |
+| ⏳ | Decoy-blob payload scattering ("lattice") | Python / stub layout | High | Medium |
+| ⏳ | In-VM opcode table re-verification | `.so` | High | Medium-High |
+
+> After some hardening, I want to work on antitamper, antidebug, and improving that side of the project. Both .so and in python.
+
+<br>
