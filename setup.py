@@ -73,7 +73,7 @@ else:
 setup(
     name="gnolly",
     version="1.0.0",
-    description="Professional Python code protection. Free, and with no paywalls.",
+    description="Python code protection that's free with no paywalls.",
     packages=find_packages(),
     ext_modules=ext_modules,
     python_requires=">=3.11",
