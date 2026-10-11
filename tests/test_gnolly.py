@@ -514,6 +514,126 @@ class TestAntiDebug:
             assert name not in stub, f"'{name}' visible in stub"
 
 
+# ── Decorrelated / delayed failure reaction (gnolly.poison) ──────────────────
+
+class TestPoison:
+    def test_fold_poison_zero_is_deterministic(self):
+        """Same inputs, poison=0 -> same output every time (identity w.r.t.
+        the build-time fold, which always uses 0 -> see pipeline.protect)."""
+        from gnolly.poison import fold_poison
+        pw = b"x" * 32
+        assert fold_poison(pw, 0) == fold_poison(pw, 0)
+
+    def test_fold_poison_nonzero_differs(self):
+        """Any nonzero poison value must produce a different effective key
+        than poison=0, or a tripped check would silently decrypt fine."""
+        from gnolly.poison import fold_poison
+        pw = b"x" * 32
+        baseline = fold_poison(pw, 0)
+        for v in (1, 2, 0xDEADBEEF, 0xFFFFFFFF):
+            assert fold_poison(pw, v) != baseline
+
+    def test_fold_poison_mask_wraps(self):
+        """Values outside 32 bits are masked -> must match the stub's own
+        '& 0xFFFFFFFF' masking in poison_mark_expr/generate_poison_fold_lines."""
+        from gnolly.poison import fold_poison
+        pw = b"y" * 32
+        assert fold_poison(pw, 0x1_0000_0001) == fold_poison(pw, 1)
+
+    def test_poison_mark_expr_moves_accumulator(self):
+        """The mark expression must be a real, non-identity transform on
+        every call (nonce is never 0), and must stay within 32 bits."""
+        from gnolly.poison import poison_mark_expr
+        obn = lambda n: str(n)  # identity obfuscator for this unit test
+        acc = 0
+        for _ in range(20):
+            expr = poison_mark_expr("acc", obn)
+            acc = eval(expr.split("=", 1)[1], {"acc": acc})
+            assert 0 <= acc <= 0xFFFFFFFF
+        assert acc != 0  # at least one mark must have actually moved it
+
+    def test_decorrelated_failure_surfaces_inside_compiled_core(self):
+        """With decorrelate_checks=True,
+        a tripped anti-debug check must NOT raise SystemExit
+        from within the stub's own (obfuscated) frame -> it must only show
+        up later, inside gnolly_run's generic decrypt-failure handler in
+        the compiled core. With decorrelate_checks=False, it's the reverse:
+        the stub exits on the spot and the compiled core is never reached.
+        """
+        import traceback
+        from gnolly.pipeline import protect
+        from gnolly.keymanager import generate_key, key_to_hex
+
+        def _frames_reach_core(decorrelate: bool) -> bool:
+            key = generate_key()
+            stub = protect("print('x')", key, decorrelate_checks=decorrelate)
+            os.environ["GNOLLY_KEY"] = key_to_hex(key)
+            sys.settrace(lambda *a: None)
+            try:
+                with pytest.raises(SystemExit) as excinfo:
+                    exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
+                tb = traceback.extract_tb(excinfo.tb)
+            finally:
+                sys.settrace(None)
+            return any("_gnolly_core" in f.filename for f in tb)
+
+        assert _frames_reach_core(True) is True
+        assert _frames_reach_core(False) is False
+
+    def test_fast_timing_gate_closed_and_effective(self):
+        """generate_antidebug_lines via _timing_var used
+        to be imported but never closed in stub.py.
+        Here we are forcing an impossibly-fast elapsed time
+        (patched time.perf_counter) must actually break decryption, not
+        just generate dead code. This is also a regression test for two bugs found while
+        wiring this up: (1) the poison fold originally ran BEFORE this
+        check closed; (2) the mark operation used XOR, which control-flow flattening could fire
+        twice and cancel back to 0. (which is now OR which can't self-cancel.)"""
+        import time as real_time
+        from gnolly.pipeline import protect
+        from gnolly.keymanager import generate_key, key_to_hex
+
+        for flatten in (True, False):
+            key = generate_key()
+            stub = protect("print('should not run')", key, flatten=flatten)
+            os.environ["GNOLLY_KEY"] = key_to_hex(key)
+            orig_pc = real_time.perf_counter
+            real_time.perf_counter = lambda: 1000.0
+            try:
+                with pytest.raises(SystemExit):
+                    exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
+            finally:
+                real_time.perf_counter = orig_pc
+
+    def test_poison_mark_expr_is_idempotent_under_double_execution(self):
+        """OR-based marking must not cancel out if the same mark statement
+        somehow executes twice (see test above for why that can happen)."""
+        from gnolly.poison import poison_mark_expr
+        obn = lambda n: str(n)
+        expr = poison_mark_expr("acc", obn)
+        ns = {"acc": 0}
+        exec(expr, ns)
+        once = ns["acc"]
+        exec(expr, ns)  # run the exact same generated statement again
+        assert once != 0
+        assert ns["acc"] == once  # second firing must not change/cancel it
+
+    def test_normal_execution_unaffected_by_decorrelation(self):
+        """Sanity check: decorrelate_checks=True must not change behavior
+        on a clean run (poison accumulator stays 0 -> fold is a no-op)."""
+        import io, contextlib
+        from gnolly.pipeline import protect
+        from gnolly.keymanager import generate_key, key_to_hex
+
+        key = generate_key()
+        stub = protect("print('poison ok')", key, decorrelate_checks=True)
+        os.environ["GNOLLY_KEY"] = key_to_hex(key)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exec(compile(stub, "p.py", "exec"), {"__builtins__": __builtins__})
+        assert buf.getvalue().strip() == "poison ok"
+
+
 # ── Machine Binding ───────────────────────────────────────────────────────────
 
 class TestMachineBinding:
