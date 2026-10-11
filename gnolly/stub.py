@@ -22,13 +22,20 @@ import hashlib
 import random
 import secrets
 import struct
-from .antidebug import generate_antidebug_lines, generate_timing_check_lines, generate_slow_timing_check_lines
+from .antidebug import (
+    generate_antidebug_lines, generate_timing_check_lines,
+    generate_slow_timing_check_lines,
+)
 from .binding_stub import generate_binding_lines
 from .import_hook  import generate_import_hook_lines, get_core_so_hash, get_vm_so_hash
 from .namegen import random_confusable_name
 from .flatten import flatten_source
 from .selfhash import wrap_with_self_hash
 from .modhide import generate_hidden_decode_import
+from .poison import (
+    generate_poison_init_lines, generate_poison_fold_lines,
+    generate_poison_watch_lines, poison_mark_expr,
+)
 from .strcodec import (
     _obf_int_lambda, _split_int_list_expr,
     _enc_str, _enc_bytes_as_str,
@@ -120,12 +127,31 @@ def generate_stub(
     self_hash: bool = True,
     will_be_packed: bool = False,
     module_mode: bool = False,
+    decorrelate_checks: bool = True,
+    poison_watchdog: bool = False,
 ) -> str:
     """
     module_mode : when True, the generated stub executes the protected
-        payload directly into its own globals() instead of a __main__-style namespace. 
-        This makes the stub behave like a normal importable module. 
+        code directly into its own globals() instead of a __main__-style namespace.
+        This makes the stub behave like a normal importable module.
         Used by gnolly.package / gnolly.wheel for package and wheel protection.
+    decorrelate_checks : when True (default), anti-debug/timing/cosmetic
+        checks no longer call exit() at the point they detect a problem
+        -> see gnolly.poison. Instead they corrupt an in-memory
+        accumulator that gets folded into the decryption key hundreds
+        of lines later, right alongside the existing integrity fold.
+        A tripped check now surfaces as an ordinary "decryption failed"
+        outcome, indistinguishable from a wrong password, with no
+        exit() call anywhere near the check that found it. Set False
+        to get the old immediate-exit-at-detection-site behavior back
+        (useful while developing/debugging a protected build).
+    poison_watchdog : when True, additionally starts a daemon thread
+        that hard-kills the process (os._exit) after a randomized
+        delay if the poison accumulator is nonzero -> an independent,
+        out-of-band backup reaction on top of the key fold above (see
+        gnolly.poison.generate_poison_watch_lines). Off by default
+        since it is a more aggressive default than the key
+        fold alone. Has no effect when decorrelate_checks is False.
     """
     rng = random.SystemRandom()
     N   = _gen_names(190)
@@ -285,11 +311,27 @@ def generate_stub(
     a(_junk_assign(sm_tmp))
     a("")
 
+    # ── POISON ACCUMULATOR (see gnolly.poison) ─────────────────────────────────
+    # Checks mark this instead of exiting on the spot when
+    # decorrelate_checks is on; it only gets acted upon much later, far
+    # from any individual check -> see the fold right before cr_var().
+    poison_var = None
+    if decorrelate_checks:
+        _p_rng = random.Random(secrets.randbits(64))
+        _pinit_lines, poison_var = generate_poison_init_lines(s_fn, str_key, obn, _p_rng, set(N))
+        for _pl in _pinit_lines:
+            a(_pl)
+        if poison_watchdog:
+            for _pwl in generate_poison_watch_lines(
+                    poison_var, s_fn, h_os, str_key, obn, imp_fn=imp_fn):
+                a(_pwl)
+        a("")
+
     # ── ANTI-DEBUG CHECKS (before any crypto work) ──────────────────────────────
     _ad_lines, _timing_var = generate_antidebug_lines(
         s_fn=s_fn, h_sys=h_sys,
         exit_enc=exit_enc, str_key=str_key, obn=obn,
-        imp_fn=imp_fn, h_blt=h_blt)
+        imp_fn=imp_fn, h_blt=h_blt, poison_var=poison_var)
     for _adl in _ad_lines:
         a(_adl)
     a("")
@@ -302,7 +344,7 @@ def generate_stub(
     # check doesn't disable this one or vice versa.
     for _stl in generate_slow_timing_check_lines(
             s_fn=s_fn, h_sys=h_sys, exit_enc=exit_enc, str_key=str_key,
-            obn=obn, imp_fn=imp_fn):
+            obn=obn, imp_fn=imp_fn, poison_var=poison_var):
         a(_stl)
     a("")
 
@@ -319,7 +361,10 @@ def generate_stub(
     a(f"{v[28]} = getattr({h_hash}, {s_fn}({sha256_enc}))({sm_data})")
     a(v[28] + " = " + em(v[28], "hexdigest"))
     a(f"if {v[28]} != {s_fn}({_enc_str(hash_hex, str_key)}):")
-    a(f"    getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})")
+    if poison_var is not None:
+        a(f"    {poison_mark_expr(poison_var, obn)}")
+    else:
+        a(f"    getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})")
     a("")
 
     # ── REDUNDANT CHECK: slow-execution debugger detection (instance 2/2) ────
@@ -327,7 +372,7 @@ def generate_stub(
     # structurally -> patching the first doesn't remove this one.
     for _stl2 in generate_slow_timing_check_lines(
             s_fn=s_fn, h_sys=h_sys, exit_enc=exit_enc, str_key=str_key,
-            obn=obn, imp_fn=imp_fn):
+            obn=obn, imp_fn=imp_fn, poison_var=poison_var):
         a(_stl2)
     a("")
 
@@ -410,13 +455,28 @@ def generate_stub(
           f".digest()")
         a("")
 
+        # ── CLOSE CHECK 5: fast timing gate ("too fast" = mocked/replayed) ─────
+        for _ftl in generate_timing_check_lines(
+                vt2=_timing_var, s_fn=s_fn, h_sys=h_sys, exit_enc=exit_enc,
+                str_key=str_key, obn=obn, imp_fn=imp_fn, poison_var=poison_var):
+            a(_ftl)
+        a("")
+
+        # ── POISON FOLD: whatever every check above found gets folded in here ──
+        if poison_var is not None:
+            for _pfl in generate_poison_fold_lines(
+                    poison_var, sm_key, h_hash, _hmac_var,
+                    s_fn, b_fn, str_key, byt_key, obn):
+                a(_pfl)
+            a("")
+
         # Both .so files verified, loaded, and the VM registered into core.
         # gnolly_run will hard-exit if _VM_LOADED is somehow still False.
         a(f"{cr_var}({sm_data}, {sm_key},")
         a(f"    {b_fn}({salt_enc}), {b_fn}({iv_enc}), {b_fn}({tag_enc}),")
         if module_mode:
             # Execute directly into this module's own globals() so the functions/classes the protected source defines
-            # end up in the real module __dict__ and relative imports between protected sibling modules resolve normally. 
+            # end up in the real module __dict__ and relative imports between protected sibling modules resolve normally.
             # Note: stub-internal helper names (decoder lambdas, module handles, etc.) remain
             # visible in the module's namespace afterward -> they don't collide with real names and don't affect behavior, but "dir()"
             # on the module will show them alongside the real API.
