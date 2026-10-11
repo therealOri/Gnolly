@@ -25,6 +25,7 @@ import random
 import secrets
 from .namegen import random_confusable_name
 from .strcodec import _enc_str
+from .poison import poison_mark_expr
 
 
 # Known debugger / analysis module names -> encoded so they don't appear plaintext
@@ -51,6 +52,7 @@ def generate_antidebug_lines(
     obn,             # obf_int callable
     imp_fn: str = "__import__",
     h_blt: str | None = None,  # builtins module handle -> obfuscates None/True/False
+    poison_var: str | None = None,  # see gnolly.poison -> when set, checks mark the accumulator instead of exiting on the spot
 ) -> list[str]:
     """
     Return a list of Python source lines (strings) to emit in the stub,
@@ -59,6 +61,11 @@ def generate_antidebug_lines(
 
     These lines are inserted BEFORE the integrity check (state 1) so that
     any analysis attempt triggers exit before any crypto work is done.
+
+    poison_var: when given, a failed check no longer calls exit() here
+    at all -> it corrupts the poison accumulator instead and the actual reaction happens
+    elsewhere later on via gnolly.poison.generate_poison_fold_lines.
+    When None, exit behavior remains unchanged.
     """
     lines = []
     a = lines.append
@@ -90,7 +97,10 @@ def generate_antidebug_lines(
     vt, vp, vm, vmod, vt2, vt3 = (
         random_confusable_name(_tv_rng, _tv_used, 6) for _ in range(6))
 
-    exit_call = f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
+    exit_call = (
+        poison_mark_expr(poison_var, obn) if poison_var is not None
+        else f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
+    )
 
     # ── Check 1: trace hook ───────────────────────────────────────────────────
     a(f"{vt} = getattr({h_sys}, {s('gettrace')})()")
@@ -152,10 +162,15 @@ def generate_timing_check_lines(
     obn,
     min_seconds: float = 0.001,
     imp_fn: str = "__import__",
+    poison_var: str | None = None,  # see generate_antidebug_lines
 ) -> list[str]:
     """
-    Lines to emit AFTER KDF has run, completing the timing gate.
-    KDF should take > 1ms. Faster = mocked/replayed.
+    This closes the timing gate opened near the top of the stub (vt2, returned
+    by generate_antidebug_lines). PBKDF2 derivation happens
+    inside the compiled core (gnolly_run) and isn't independently
+    visible to the Python-level stub, so this brackets everything the
+    stub itself does between opening the gate and handing off to the
+    core instead.
     """
     lines = []
     a = lines.append
@@ -166,14 +181,16 @@ def generate_timing_check_lines(
     def s(text: str) -> str:
         return f"{s_fn}({enc(text)})"
 
-    exit_call = f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
+    exit_call = (
+        poison_mark_expr(poison_var, obn) if poison_var is not None
+        else f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
+    )
     _tc_rng = random.Random(secrets.randbits(64))
     vt3 = random_confusable_name(_tc_rng, set(), 6)
 
     a(f"{vt3} = getattr({imp_fn}({s('time')}), {s('perf_counter')})()")
     # min_seconds obfuscated as a/b float expression
     a(f"if ({vt3} - {vt2}) < {min_seconds}: {exit_call}")
-
 
     return lines
 
@@ -187,6 +204,7 @@ def generate_slow_timing_check_lines(
     imp_fn: str = "__import__",
     iterations: int = 60_000,
     max_seconds: float = 0.35,
+    poison_var: str | None = None,  # see generate_antidebug_lines
 ) -> list[str]:
     """
     Complement to the existing timing gate (which only catches KDF running
@@ -212,7 +230,10 @@ def generate_slow_timing_check_lines(
     def s(text: str) -> str:
         return f"{s_fn}({enc(text)})"
 
-    exit_call = f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
+    exit_call = (
+        poison_mark_expr(poison_var, obn) if poison_var is not None
+        else f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
+    )
     rng = random.Random(secrets.randbits(64))
     used: set = set()
     vt0, vt1, vi, vacc = (random_confusable_name(rng, used, length=rng.randint(6, 11)) for _ in range(4))
