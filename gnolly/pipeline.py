@@ -43,6 +43,7 @@ from .pack        import pack_source
 from .build_core  import ensure_core
 from .binding     import bind_salt, collect_fingerprint, fingerprint_from_hex
 from .integrity   import collect_runtime_hashes, fold_integrity
+from .poison      import fold_poison
 from .vm_pipeline import protect_with_vm
 from .vm_translate import VMUnsupportedError
 
@@ -76,6 +77,8 @@ def protect(
     module_mode: bool = False,
     bogus_hierarchy: bool = True,
     alias_exprs: bool = True,
+    decorrelate_checks: bool = True,
+    poison_watchdog: bool = False,
 ) -> str:
     """
     Parameters
@@ -129,6 +132,19 @@ def protect(
                       obfuscation passes. On by default.
     alias_exprs     : toggle AST-level expression aliasing -> call results are randomly
                       routed through one or more layer(s) of indirection.
+    decorrelate_checks : toggle decorrelated/delayed failure reaction for
+                      the stub's anti-debug, timing, and cosmetic
+                      checks (see gnolly.poison). On by default: a
+                      failed check no longer exit()s at the point it's
+                      detected -> it corrupts an accumulator that gets
+                      folded into the decryption key hundreds of lines
+                      later instead. Disable to get the old
+                      immediate-exit-at-detection-site behavior back.
+    poison_watchdog : toggles an additional daemon-thread backup
+                      reaction (random-delay hard process kill if the
+                      poison accumulator is nonzero), independent of
+                      the key fold above. Off by default; only has an
+                      effect when decorrelate_checks is True.
     """
     def _log(msg: str) -> None:
         if verbose:
@@ -195,6 +211,11 @@ def protect(
         ).digest()
     runtime_hashes = collect_runtime_hashes()
     _effective_password = fold_integrity(_effective_password, runtime_hashes)
+    if decorrelate_checks:
+        # Mirror of the runtime poison fold (see gnolly.poison and
+        # stub.py) with the accumulator fixed at 0 -> nothing has
+        # failed yet at build time by definition.
+        _effective_password = fold_poison(_effective_password, poison_value=0)
     encrypted_blob = encrypt(compressed, _effective_password)
 
     salt = encrypted_blob[_MAGIC_VER_LEN            : _MAGIC_VER_LEN + _SALT_LEN]
@@ -222,6 +243,8 @@ def protect(
         self_hash       = self_hash,
         will_be_packed  = pack,
         module_mode     = module_mode,
+        decorrelate_checks = decorrelate_checks,
+        poison_watchdog = poison_watchdog,
     )
     if minify:
         _log("Minifying stub …")
