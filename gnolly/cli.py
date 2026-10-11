@@ -86,6 +86,8 @@ def cmd_protect(args):
         pack                = not args.no_pack,
         bogus_hierarchy     = not args.no_hierarchy,
         alias_exprs         = not args.no_alias,
+        decorrelate_checks  = not args.no_decorrelate,
+        poison_watchdog     = args.poison_watchdog,
     )
     print(f"\n[gnolly] Done -> {out}")
     print(f"[gnolly] Runtime:")
@@ -133,6 +135,8 @@ def cmd_protect_dir(args):
         pack                = not args.no_pack,
         bogus_hierarchy     = not args.no_hierarchy,
         alias_exprs         = not args.no_alias,
+        decorrelate_checks  = not args.no_decorrelate,
+        poison_watchdog     = args.poison_watchdog,
     )
     print(f"\n[gnolly] Runtime:")
     print(f"           export GNOLLY_KEY={key_to_hex(key)}")
@@ -187,6 +191,8 @@ def cmd_protect_wheel(args):
         pack                = not args.no_pack,
         bogus_hierarchy     = not args.no_hierarchy,
         alias_exprs         = not args.no_alias,
+        decorrelate_checks  = not args.no_decorrelate,
+        poison_watchdog     = args.poison_watchdog,
     )
     print(f"\n[gnolly] Wheel:   {wheel_path}")
     print(f"[gnolly] Install: pip install {wheel_path}")
@@ -218,6 +224,15 @@ def _add_obf_flags(p):
                    help="Bind output to THIS machine (uses current machine fingerprint)")
     p.add_argument("--bind-fp",    default=None, dest="bind_fp",
                    help="Bind to a specific machine fingerprint hex (from 'gnolly fingerprint')")
+    p.add_argument("--no-decorrelate", action="store_true", dest="no_decorrelate",
+                   help="Disable decorrelated/delayed failure reaction (anti-debug/timing/"
+                        "cosmetic checks exit() immediately at the detection site instead of "
+                        "folding into the decryption key later; on by default -> see "
+                        "gnolly.poison, useful mainly while debugging a protected build)")
+    p.add_argument("--poison-watchdog", action="store_true", dest="poison_watchdog",
+                   help="Add a daemon-thread backup reaction: hard-kill the process after a "
+                        "randomized delay if any check ever flagged something. Off by default; "
+                        "has no effect with --no-decorrelate")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--verbose-errors", action="store_true", dest="verbose_errors",
                    help="Emit error messages from protected stub on failure (development only; default is silent)")
