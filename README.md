@@ -39,6 +39,11 @@ __ __
 >
 > I also have not tested anything out on windows systems yet, so be aware that idk if it works well on windows or not.
 
+> [!WARNING]
+> The protection here has not been "battle tested" yet and is incomplete, it is still in early development but it's at a stage where I am okay with it being public now.
+> If you have any issues or feedback, feel free to make and issue or make a PR.
+
+
 <br>
 
 ## What Gnolly does
