@@ -31,7 +31,7 @@ __ __
 
 <br>
 
-Gnolly encrypts, compresses, and obfuscates your Python source so that only someone holding your key can run it. It is a direct free alternative to PyArmor and similar tools, just without the paywalls, license servers, or activation requirements.
+Gnolly encrypts, compresses, and obfuscates your python source so that only someone holding your key can run it. It is a direct free alternative to PyArmor and similar tools, just without the paywalls, license servers, or activation requirements.
 __ __
 
 > [!IMPORTANT]
@@ -150,7 +150,7 @@ Two compiled C extensions are required for every protected file:
 
 > Both must be present at runtime. If either is missing, the protected script just exits silently.
 
-The suffix encodes the Python version and platform, e.g. `.cpython-312-x86_64-linux-gnu.so`. **You must rebuild for each target platform and Python version.**
+The suffix encodes the python version and platform, e.g. `.cpython-312-x86_64-linux-gnu.so`. **You must rebuild for each target platform and Python version.**
 
 <br>
 
@@ -161,7 +161,7 @@ The suffix encodes the Python version and platform, e.g. `.cpython-312-x86_64-li
 |---|---|---|
 | 1 | Same directory as the `.gnly.py` file | Simplest, just drop both files together |
 | 2 | `./gnolly/` relative to current working directory | Running from a project root with gnolly installed locally |
-| 3 | The `gnolly` package directory (via `sys.modules`) | gnolly installed in the Python environment |
+| 3 | The `gnolly` package directory (via `sys.modules`) | gnolly installed in the python environment |
 | 4 | `sys.path` scan for any `gnolly/` subdirectory | Non-standard layouts, virtualenvs |
 
 **Simplest deployment** -> put everything in one folder:
@@ -400,7 +400,7 @@ This composes with the `.so` integrity binding described [above](#versioning-the
 
 ### What Gnolly does NOT do
 
-- **Gnolly is not DRM.** A determined adversary with your key and a C-level debugger (e.g. gdb attached to the Python process) can reconstruct logic by instrumenting the runtime at the C level. Code protection raises the cost and effort of reverse engineering; it does not make it theoretically impossible. 
+- **Gnolly is not DRM.** A determined adversary with your key and a C-level debugger (e.g. gdb attached to the python process) can reconstruct logic by instrumenting the runtime at the C level. Code protection raises the cost and effort of reverse engineering; it does not make it theoretically impossible. 
 - Gnolly does not prevent inspection of process memory at runtime. (yet)
 - Gnolly does not enforce expiry dates, seat counts, or call home. This was explored and deliberately dropped: no software-only scheme on untrusted hardware can be made truly unbypassable, and PyArmor's own expiry is just a locally clock-checked file.
 > Python-source obfuscation (flatten, self-hash, modhide, antidebug) raises the cost of casual/automated attacks a lot, but a patient, skilled attacker gets through it eventually, the interpreter has to be able to run the real logic somewhere. See [What's next](#whats-next) for where more work is planned.
@@ -433,14 +433,14 @@ __ __
 
 ### Key differences
 
-**vs. PyArmor** -> PyArmor is an industry standard for Python obfuscation. Its VM mode (`--advanced 2`) is strong but requires a paid Pro license, per-machine activation, and a connection to PyArmor's license server. Newer versions enforce seat limits and can remotely revoke licenses. Gnolly matches PyArmor's protection level for free, with no activation, no phone-home, and AES-256-GCM (authenticated encryption) rather than PyArmor's older schemes. 
+**vs. PyArmor** -> PyArmor is an industry standard for python obfuscation. Its VM mode (`--advanced 2`) is strong but requires a paid Pro license, per-machine activation, and a connection to PyArmor's license server. Newer versions enforce seat limits and can remotely revoke licenses. Gnolly matches PyArmor's protection level for free, with no activation, no phone-home, and AES-256-GCM (authenticated encryption) rather than PyArmor's older schemes. 
 > (Because it is close source idk if what I have is actually better or not, but it does work.)
 
 <br>
 
 **vs. Cython** -> Cython compiles Python to a C extension but the `.so` is fairly reversible with tools like `pycdc`. It provides no encryption and no runtime key requirement. Gnolly provides much stronger protection for scripts that don't need to be compiled to native C.
 
-**vs. Nuitka** -> Nuitka produces a standalone native binary (no Python required to run). The compiled binary can be disassembled; it is a packaging and performance tool rather than an IP-protection tool. The right choice when you want a self-contained executable; Gnolly is the right choice when you want a `.py` file that runs on any Python installation with a key. 
+**vs. Nuitka** -> Nuitka produces a standalone native binary (no python required to run). The compiled binary can be disassembled; it is a packaging and performance tool rather than an IP-protection tool. The right choice when you want a self-contained executable; Gnolly is the right choice when you want a `.py` file that runs on any python installation with a key. 
 > (Use both for a best of both worlds option.)
 
 <br>
@@ -461,7 +461,7 @@ Python-source obfuscation -> everything currently in `flatten.py`, `selfhash.py`
 | ⏳ | Delayed / decorrelated failure reaction | Python | Low | High |
 | ⏳ | ptrace self-attach | `.so` (Linux) | Low | High |
 | ⏳ | Argon2id key derivation | `.so` / crypto | Low-Med | Medium |
-| ⏳ | Extra Python trigger primitives (`weakref`, `atexit`, `__del__`, frame inspection) | Python | Low | Medium |
+| ⏳ | Extra python trigger primitives (`weakref`, `atexit`, `__del__`, frame inspection) | Python | Low | Medium |
 | ⏳ | Continuous (not just startup) integrity checks | Python + `.so` | Medium | High |
 | ⏳ | Cross-checking checks | Python | Medium | Medium-High |
 | ⏳ | Explicit buffer wiping after decrypt | `.so` | Medium | High |
