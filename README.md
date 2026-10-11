@@ -463,7 +463,7 @@ Python-source obfuscation -> everything currently in `flatten.py`, `selfhash.py`
 
 | Progress | Technique | Layer | Effort | Value vs. serious attacker |
 |---|---|---|---|---|
-| ⏳ | Delayed / decorrelated failure reaction | Python | Low | High |
+| ✅ | Delayed / decorrelated failure reaction | Python | Low | High |
 | ⏳ | ptrace self-attach | `.so` (Linux) | Low | High |
 | ⏳ | Argon2id key derivation | `.so` / crypto | Low-Med | Medium |
 | ⏳ | Extra python trigger primitives (`weakref`, `atexit`, `__del__`, frame inspection) | Python | Low | Medium |
