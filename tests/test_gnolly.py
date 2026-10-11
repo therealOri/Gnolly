@@ -46,7 +46,7 @@ def sample_protected_run():
     os.environ["GNOLLY_KEY"] = key_to_hex(key)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        exec(compile(stub, "sample.gnolly.py", "exec"), {"__builtins__": __builtins__})
+        exec(compile(stub, "sample.gnly.py", "exec"), {"__builtins__": __builtins__})
     return {"stub": stub, "key_hex": key_to_hex(key), "output": buf.getvalue()}
 
 
@@ -196,10 +196,18 @@ class TestObfuscation:
         assert "hello world" not in obf
 
     def test_integers_obfuscated(self):
+        """The original literal must never appear as a bare constant node
+        representing x's value."""
+        import ast
         from gnolly.obfuscate import obfuscate_source
         src = "x = 12345"
         obf = obfuscate_source(src)
-        assert "12345" not in obf
+        tree = ast.parse(obf)
+        leaked = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and node.value == 12345
+        ]
+        assert not leaked, f"12345 appears as a bare literal: {ast.dump(leaked[0])}"
 
     def test_docstrings_removed(self):
         from gnolly.obfuscate import obfuscate_source
@@ -259,7 +267,7 @@ print(greet(name="Gnolly", greeting="Hi"))
 class TestPipeline:
     def test_simple(self, trivial_protected_stub):
         os.environ["GNOLLY_KEY"] = trivial_protected_stub["key_hex"]
-        exec(compile(trivial_protected_stub["stub"], "protected.gnolly.py", "exec"),
+        exec(compile(trivial_protected_stub["stub"], "protected.gnly.py", "exec"),
              {"__builtins__": __builtins__})
 
     def test_output_correct(self):
@@ -375,7 +383,7 @@ class TestPipelineWithShuffle:
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            exec(compile(stub, "p.gnolly.py", "exec"), {"__builtins__": __builtins__})
+            exec(compile(stub, "p.gnly.py", "exec"), {"__builtins__": __builtins__})
         assert buf.getvalue().strip() == "no shuffle"
 
 
@@ -401,8 +409,8 @@ class TestPackageProtection:
         results = protect_package(pkg, out_dir, key)
 
         assert len(results) == 2
-        assert (out_dir / "__init__.gnolly.py").exists()
-        assert (out_dir / "math_utils.gnolly.py").exists()
+        assert (out_dir / "__init__.gnly.py").exists()
+        assert (out_dir / "math_utils.gnly.py").exists()
 
     def test_protected_package_files_execute(self, tmp_path):
         from gnolly.package import protect_package
@@ -421,10 +429,10 @@ class TestPackageProtection:
         results = protect_package(pkg, out_dir, key)
 
         os.environ["GNOLLY_KEY"] = key_to_hex(key)
-        protected_file = out_dir / "calc.gnolly.py"
+        protected_file = out_dir / "calc.gnly.py"
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            exec(compile(protected_file.read_text(), "calc.gnolly.py", "exec"),
+            exec(compile(protected_file.read_text(), "calc.gnly.py", "exec"),
                  {"__builtins__": __builtins__})
         assert buf.getvalue().strip() == "42"
 
@@ -442,7 +450,7 @@ class TestPackageProtection:
         results = protect_package(pkg, out_dir, key, exclude=["**/test_*.py"])
 
         assert len(results) == 1
-        assert not (out_dir / "test_main.gnolly.py").exists()
+        assert not (out_dir / "test_main.gnly.py").exists()
 
 
 # ── Anti-Debug ────────────────────────────────────────────────────────────────
@@ -588,7 +596,7 @@ class TestPoison:
         just generate dead code. This is also a regression test for two bugs found while
         wiring this up: (1) the poison fold originally ran BEFORE this
         check closed; (2) the mark operation used XOR, which control-flow flattening could fire
-        twice and cancel back to 0. (which is now OR which can't self-cancel.)"""
+        twice and cancel back to 0. (Which is now OR, which can't self-cancel.)"""
         import time as real_time
         from gnolly.pipeline import protect
         from gnolly.keymanager import generate_key, key_to_hex
