@@ -86,6 +86,11 @@ def build_core(verbose: bool = True) -> bool:
         extra_ld  = []
         if sys.platform == "darwin":
             extra_cc += ["-mmacosx-version-min=10.9"]
+        if sys.platform.startswith("linux"):
+            # Needed for the pthread-based ptrace heartbeat in _gnolly_core.pyx -> ...
+            # It is harmless to link even when a given protected build never enables ptrace_guard.
+            extra_cc += ["-pthread"]
+            extra_ld += ["-pthread"]
 
         ext = Extension(
             name="gnolly._gnolly_core",
