@@ -26,6 +26,10 @@ from .antidebug import (
     generate_antidebug_lines, generate_timing_check_lines,
     generate_slow_timing_check_lines,
 )
+from .ptrace_guard import (
+    generate_ptrace_guard_call_lines,
+    DEFAULT_HEARTBEAT_MIN_DELAY, DEFAULT_HEARTBEAT_MAX_DELAY,
+)
 from .binding_stub import generate_binding_lines
 from .import_hook  import generate_import_hook_lines, get_core_so_hash, get_vm_so_hash
 from .namegen import random_confusable_name
@@ -129,6 +133,11 @@ def generate_stub(
     module_mode: bool = False,
     decorrelate_checks: bool = True,
     poison_watchdog: bool = False,
+    ptrace_guard: bool = False,
+    ptrace_guard_strict: bool = True,
+    ptrace_guard_heartbeat: bool = True,
+    ptrace_guard_heartbeat_min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
+    ptrace_guard_heartbeat_max_delay: float = DEFAULT_HEARTBEAT_MAX_DELAY,
 ) -> str:
     """
     module_mode : when True, the generated stub executes the protected
@@ -152,6 +161,28 @@ def generate_stub(
         gnolly.poison.generate_poison_watch_lines). Off by default
         since it is a more aggressive default than the key
         fold alone. Has no effect when decorrelate_checks is False.
+    ptrace_guard : Linux-only. When True, the stub self-attaches via
+        ptrace(PTRACE_TRACEME,...) immediately after it loads and
+        SHA-256-verifies gnolly/_gnolly_core.so.
+    ptrace_guard_strict : when True (default), a ptrace_guard failure
+        reacts like every other antidebug.py check (poison-mark if
+        decorrelate_checks is on, else immediate exit) -> the default
+        is set to strict because enabling ptrace_guard at all is already an
+        active choice to want this protection, and there is no softer alternative to fall back to.
+        Set False only for a deployment target you've confirmed denies
+        ptrace outright (e.g. a container without CAP_SYS_PTRACE).
+    ptrace_guard_heartbeat : when True (default, and ptrace_guard
+        succeeded at runtime), the .so starts a detached pthread that periodically re-reads /proc/<pid>/status's
+        TracerPid for the thread that was originally self-attached; if it
+        ever reads back 0, the self-trace was removed (real parent
+        detached or exited) and the process is killed outright via
+        _exit() in C. No effect when ptrace_guard is False.
+    ptrace_guard_heartbeat_min_delay, ptrace_guard_heartbeat_max_delay :
+        randomized re-check interval in seconds for the heartbeat
+        above (default DEFAULT_HEARTBEAT_MIN_DELAY/MAX_DELAY from
+        gnolly.ptrace_guard, 0.0005-0.002, i.e. 0.5-2ms -> edit those
+        two constants directly to change the project-wide default;
+        these aren't exposed as CLI flags).
     """
     rng = random.SystemRandom()
     N   = _gen_names(190)
@@ -241,6 +272,22 @@ def generate_stub(
     a(_junk_assign(N[24]))
     a("")
 
+    # ── POISON ACCUMULATOR (see gnolly.poison) ─────────────────────────────────
+    # Checks mark this instead of exiting on the spot when
+    # decorrelate_checks is on; it only gets acted upon much later, far
+    # from any individual check -> see the fold right before cr_var().
+    poison_var = None
+    if decorrelate_checks:
+        _p_rng = random.Random(secrets.randbits(64))
+        _pinit_lines, poison_var = generate_poison_init_lines(s_fn, str_key, obn, _p_rng, set(N))
+        for _pl in _pinit_lines:
+            a(_pl)
+        if poison_watchdog:
+            for _pwl in generate_poison_watch_lines(
+                    poison_var, s_fn, h_os, str_key, obn, imp_fn=imp_fn):
+                a(_pwl)
+        a("")
+
     # ── Payload blob chunks ───────────────────────────────────────────────────
     chunks = _split_blob(blob_encoded, rng)
     used_cvars = chunk_vars[:len(chunks)]
@@ -310,22 +357,6 @@ def generate_stub(
     a(f"{sm_data} = {sm_key} = " + sing("None"))
     a(_junk_assign(sm_tmp))
     a("")
-
-    # ── POISON ACCUMULATOR (see gnolly.poison) ─────────────────────────────────
-    # Checks mark this instead of exiting on the spot when
-    # decorrelate_checks is on; it only gets acted upon much later, far
-    # from any individual check -> see the fold right before cr_var().
-    poison_var = None
-    if decorrelate_checks:
-        _p_rng = random.Random(secrets.randbits(64))
-        _pinit_lines, poison_var = generate_poison_init_lines(s_fn, str_key, obn, _p_rng, set(N))
-        for _pl in _pinit_lines:
-            a(_pl)
-        if poison_watchdog:
-            for _pwl in generate_poison_watch_lines(
-                    poison_var, s_fn, h_os, str_key, obn, imp_fn=imp_fn):
-                a(_pwl)
-        a("")
 
     # ── ANTI-DEBUG CHECKS (before any crypto work) ──────────────────────────────
     _ad_lines, _timing_var = generate_antidebug_lines(
@@ -421,6 +452,21 @@ def generate_stub(
         )
         for _hl in _hook_lines:
             a(_hl)
+
+        # ── PTRACE SELF-ATTACH (Linux-only; .so layer ──────────────
+        # Fires immediately after the core .so is loaded AND
+        # hash-verified -> The actual self-attach syscall and (optionally) its periodic
+        # re-verification both execute as compiled C inside the .so,
+        # and not as Python here.
+            for _ptl in generate_ptrace_guard_call_lines(
+                    s_fn=s_fn, h_sys=h_sys, str_key=str_key, obn=obn,
+                    core_var=N[89], h_blt=h_blt, poison_var=poison_var,
+                    strict=ptrace_guard_strict,
+                    heartbeat=ptrace_guard_heartbeat,
+                    min_delay=ptrace_guard_heartbeat_min_delay,
+                    max_delay=ptrace_guard_heartbeat_max_delay):
+                a(_ptl)
+            a("")
 
         # Also extract _gnolly_load_vm_module from the now-loaded core module,
         # using the same loaded-module variable the hook just produced (N[89]).
