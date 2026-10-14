@@ -234,6 +234,8 @@ gnolly protect <input.py> [output.py] [options]
   --no-pack               Skip the final compression pass (ship the readable stub instead)
   --bind                  Bind output to THIS machine (uses current fingerprint)
   --bind-fp HEX           Bind to a specific machine fingerprint (from 'gnolly fingerprint')
+  --ptrace                Linux-only: self-attach via ptrace so no debugger should be able to attach. Opt-in.
+  --ptrace-no-heartbeat   Disable the default re-verification heartbeat. No effect without --ptrace
   -v, --verbose           Show pipeline progress
   --verbose-errors        Emit error messages from the stub on failure (dev only)
 ```
@@ -340,11 +342,15 @@ protect(
     module_mode: bool = False,
     bogus_hierarchy: bool = True,
     alias_exprs: bool = True,
+    decorrelate_checks: bool = True,
+    poison_watchdog: bool = False,
+    ptrace_guard: bool = False,
+    ptrace_guard_strict: bool = True,
+    ptrace_guard_heartbeat: bool = True,
+    ptrace_guard_heartbeat_min_delay: float = 0.0005,
+    ptrace_guard_heartbeat_max_delay: float = 0.002,
 ) -> str
 ```
-
-> `inject_junk` toggles GIR-level junk instruction injection (after compilation, alongside the translated bytecode), separate from the AST-level `inject_dead`. `module_mode` makes the protected code execute into the stub's own `globals()` instead of a `__main__` namespace. This is what `protect-dir`/`protect-wheel` use internally for package protection. `self_hash=False` is the one you want if you need to inspect a readable stub (combine with `pack=False`).
-
 > Every call to `protect()` (and every underlying obfuscation/encoding step) is fully non-deterministic by design. There is no seed, fixed or otherwise, anywhere in the pipeline, internal or CLI-exposed. Two calls with identical `source`/`password` should produce different output.
 
 ---
@@ -392,6 +398,7 @@ This composes with the `.so` integrity binding described [above](#versioning-the
 | Obfuscated `.so` loading | Extensions are loaded by file path under a random fake module name; `gnolly` and `_gnolly_core` do not appear as strings in the stub |
 | Anti-debug (Python layer) | Trace/profile hooks, known debugger modules, and timing gates checked before any crypto work |
 | Anti-debug (C layer) | A second independent sweep runs inside the compiled `.so` after the stub's checks |
+| Anti-debug (ptrace self-attach, Linux, opt-in) | `--ptrace` self-attaches via a raw `ptrace(PTRACE_TRACEME,...)` syscall compiled into `_gnolly_core.so`, blocking any later debugger attach outright rather than detecting one after the fact; fails the run by default if that can't be established, and includes a sub-millisecond re-verification heartbeat by default. |
 | Slow-execution debugger detection | Two independent bounded-loop timing checks flag single-stepping/heavy tracing overhead (complements the existing too-fast/replay timing gate); see `gnolly/antidebug.py` |
 | Stub self-hash | The shipped stub verifies its own exact source text against an embedded digest via several independently-placed, differently-shaped checks at startup -> reformatting, patching, or beautifying the file for easier reading breaks it. See `gnolly/selfhash.py`. Always on when protecting via the CLI. Library callers can pass `self_hash=False` to `gnolly.pipeline.protect()` (e.g. alongside `pack=False`) if they need to inspect the readable stub source. |
 | Control-flow flattening | The generated stub is rewritten into an opaque dispatch-loop state machine with multiple dispatch mechanisms, rather than its natural top-to-bottom control flow. See `gnolly/flatten.py`. |
@@ -403,10 +410,21 @@ This composes with the `.so` integrity binding described [above](#versioning-the
 | Importable package / wheel protection | `gnolly protect-dir` and `gnolly protect-wheel` protect an entire package recursively and can emit a real, installable `.whl`; protected modules execute into their own module `__dict__` via `module_mode`, so normal `import` semantics keep working. |
 | Import-hook-based hiding | Select internal helper logic is hidden behind a synthetic `sys.meta_path` Finder/Loader instead of an inline `exec()`'d blob, so it looks like an ordinary import rather than code being unpacked and run at the call site. See `gnolly/modhide.py`. |
 
+### Ptrace self-attach (`--ptrace`)
+
+Linux only, off by default. A process can call `ptrace(PTRACE_TRACEME, 0, NULL, NULL)` on itself; the kernel then records its real parent as the tracer, and Linux allows only one tracer per process. Once that succeeds, a later `PTRACE_ATTACH`/`PTRACE_SEIZE` from a debugger (gdb, `strace -p`, etc.) against that PID fails outright with `EPERM` -> the debugger never gets to attach at all, rather than attaching and being caught after the fact. `/proc/<pid>/mem` reads from another process that goes through the same kernel check, so those are blocked too.
+
+```bash
+gnolly protect app.py --ptrace                  # self-attach, strict + heartbeat, both on by default
+gnolly protect app.py --ptrace --ptrace-no-heartbeat  # self-attach only, skip re-verifications
+```
+
+**Limitations:** this blocks *future* attachment; it can't retroactively catch an attacker already attached before this code runs. It does not defend against a root-level attacker reading memory through a channel that never goes through the kernel's `ptrace_may_access()` check at all -> a malicious kernel module, a hypervisor the attacker controls, or similar.
+
 ### What Gnolly does NOT do
 
 - **Gnolly is not DRM.** A determined adversary with your key and a C-level debugger (e.g. gdb attached to the python process) can reconstruct logic by instrumenting the runtime at the C level. Code protection raises the cost and effort of reverse engineering; it does not make it theoretically impossible. 
-- Gnolly does not prevent inspection of process memory at runtime. (yet)
+- Gnolly does not prevent advanced inspection of process memory at runtime by default. `--ptrace` (Linux only, opt-in) blocks the most common attach-based inspection paths but not root-level/non-ptrace channels.
 - Gnolly does not enforce expiry dates, seat counts, or call home. This was explored and deliberately dropped: no software-only scheme on untrusted hardware can be made truly unbypassable, and PyArmor's own expiry is just a locally clock-checked file.
 > Python-source obfuscation (flatten, self-hash, modhide, antidebug) raises the cost of casual/automated attacks a lot, but a patient, skilled attacker gets through it eventually, the interpreter has to be able to run the real logic somewhere. See [What's next](#whats-next) for where more work is planned.
 __ __
@@ -421,7 +439,7 @@ __ __
 | **Encryption** | AES-256-GCM | Varies by version | None | None | None |
 | **KDF** | PBKDF2-HMAC-SHA256, 600k rounds | Varies | — | — | — |
 | **True VM (not CPython eval)** | ✅ | ✅ Pro only | ❌ | ❌ | ❌ |
-| **Anti-debug** | ✅ Python + C layer | ✅ | ❌ | ❌ | ❌ |
+| **Anti-debug** | ✅ Python + C layer (+ optional ptrace self-attach on Linux) | ✅ | ❌ | ❌ | ❌ |
 | **sys.settrace fires 0 events** | ✅ | ✅ | ❌ | ❌ | ❌ |
 | **dis / decompilers blocked** | ✅ (custom GIR format) | ✅ | ❌ | ❌ | ❌ |
 | **Requires .so at runtime** | ✅ (2 files) | ✅ | ✅ | ❌ (standalone) | ❌ (bundles runtime) |
@@ -464,7 +482,7 @@ Python-source obfuscation -> everything currently in `flatten.py`, `selfhash.py`
 | Progress | Technique | Layer | Effort | Value vs. serious attacker |
 |---|---|---|---|---|
 | ✅ | Delayed / decorrelated failure reaction | Python | Low | High |
-| ⏳ | ptrace self-attach | `.so` (Linux) | Low | High |
+| ✅ | ptrace self-attach (`--ptrace`, opt-in) | `.so` (Linux) | Low | High |
 | ⏳ | Argon2id key derivation | `.so` / crypto | Low-Med | Medium |
 | ⏳ | Extra python trigger primitives (`weakref`, `atexit`, `__del__`, frame inspection) | Python | Low | Medium |
 | ⏳ | Continuous (not just startup) integrity checks | Python + `.so` | Medium | High |
