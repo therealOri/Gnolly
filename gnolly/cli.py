@@ -88,6 +88,9 @@ def cmd_protect(args):
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
         poison_watchdog     = args.poison_watchdog,
+        ptrace_guard           = args.ptrace_guard,
+        ptrace_guard_strict    = args.ptrace_guard_strict,
+        ptrace_guard_heartbeat = args.ptrace_guard_heartbeat,
     )
     print(f"\n[gnolly] Done -> {out}")
     print(f"[gnolly] Runtime:")
@@ -137,6 +140,9 @@ def cmd_protect_dir(args):
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
         poison_watchdog     = args.poison_watchdog,
+        ptrace_guard           = args.ptrace_guard,
+        ptrace_guard_strict    = args.ptrace_guard_strict,
+        ptrace_guard_heartbeat = args.ptrace_guard_heartbeat,
     )
     print(f"\n[gnolly] Runtime:")
     print(f"           export GNOLLY_KEY={key_to_hex(key)}")
@@ -193,6 +199,9 @@ def cmd_protect_wheel(args):
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
         poison_watchdog     = args.poison_watchdog,
+        ptrace_guard           = args.ptrace_guard,
+        ptrace_guard_strict    = args.ptrace_guard_strict,
+        ptrace_guard_heartbeat = args.ptrace_guard_heartbeat,
     )
     print(f"\n[gnolly] Wheel:   {wheel_path}")
     print(f"[gnolly] Install: pip install {wheel_path}")
@@ -233,6 +242,36 @@ def _add_obf_flags(p):
                    help="Add a daemon-thread backup reaction: hard-kill the process after a "
                         "randomized delay if any check ever flagged something. Off by default; "
                         "has no effect with --no-decorrelate")
+    p.add_argument("--ptrace", action="store_true", dest="ptrace_guard",
+                   help="Linux-only: self-attach via ptrace(PTRACE_TRACEME,...) immediately "
+                        "after the stub loads and hash-verifies _gnolly_core.so, so no debugger "
+                        "(gdb, strace, etc.) can attach at all, since the OS allows only one "
+                        "tracer per process. Implemented as compiled C inside the .so, not "
+                        "Python, and includes a sub-millisecond re-verification heartbeat by "
+                        "default (see --ptrace-no-heartbeat). Fails the run if self-attach "
+                        "can't be established (see --ptrace-lenient). No-ops on other platforms "
+                        "and wherever the syscall can't be reached. Off by default -> see "
+                        "gnolly.ptrace_guard for caveats (containers/seccomp, root, the startup "
+                        "race window)")
+    p.add_argument("--ptrace-lenient", action="store_false", dest="ptrace_guard_strict",
+                   default=True,
+                   help="Tolerate a ptrace failure instead of the strict default: poison-marks "
+                        "only if decorrelation is also on, and is a true no-op only with "
+                        "--no-decorrelate too. Use this once you've confirmed a specific "
+                        "deployment target denies ptrace outright (e.g. a container without "
+                        "CAP_SYS_PTRACE) -> a seccomp denial and an active debugger report the "
+                        "same errno, so this is a deliberate trade of certainty for not "
+                        "crashing that target. No effect without --ptrace")
+    p.add_argument("--ptrace-no-heartbeat", action="store_false", dest="ptrace_guard_heartbeat",
+                   default=True,
+                   help="Disable the heartbeat that periodically re-verifies the self-attach "
+                        "is still in place and hard-kills the process the moment it isn't. On "
+                        "by default (a detached pthread in the .so, not Python threading; "
+                        "measured at well under 4%% of a single core). No effect without "
+                        "--ptrace. The re-check interval isn't a CLI flag -> edit "
+                        "DEFAULT_HEARTBEAT_MIN_DELAY/MAX_DELAY in gnolly/ptrace_guard.py, or "
+                        "pass ptrace_guard_heartbeat_min_delay=/max_delay= to protect() "
+                        "directly, for a different interval")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--verbose-errors", action="store_true", dest="verbose_errors",
                    help="Emit error messages from protected stub on failure (development only; default is silent)")
