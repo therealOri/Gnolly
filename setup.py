@@ -30,6 +30,11 @@ _cc_flags = [
     *([] if os.environ.get("GNOLLY_DEBUG") else ["-DNDEBUG"]),
 ]
 _ld_flags = ["-Wl,-z,now"] if sys.platform.startswith("linux") else []
+if sys.platform.startswith("linux"):
+    # Needed for the pthread-based ptrace heartbeat in _gnolly_core.pyx -> ...
+    # It is harmless to link even when a given protected build never enables ptrace_guard.
+    _cc_flags += ["-pthread"]
+    _ld_flags += ["-pthread"]
 
 # ── Extension definitions ─────────────────────────────────────────────────────
 def _ext(name: str, pyx_or_c: str) -> Extension:
