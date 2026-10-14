@@ -44,6 +44,7 @@ from .build_core  import ensure_core
 from .binding     import bind_salt, collect_fingerprint, fingerprint_from_hex
 from .integrity   import collect_runtime_hashes, fold_integrity
 from .poison      import fold_poison
+from .ptrace_guard import DEFAULT_HEARTBEAT_MIN_DELAY, DEFAULT_HEARTBEAT_MAX_DELAY
 from .vm_pipeline import protect_with_vm
 from .vm_translate import VMUnsupportedError
 
@@ -79,6 +80,11 @@ def protect(
     alias_exprs: bool = True,
     decorrelate_checks: bool = True,
     poison_watchdog: bool = False,
+    ptrace_guard: bool = False,
+    ptrace_guard_strict: bool = True,
+    ptrace_guard_heartbeat: bool = True,
+    ptrace_guard_heartbeat_min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
+    ptrace_guard_heartbeat_max_delay: float = DEFAULT_HEARTBEAT_MAX_DELAY,
 ) -> str:
     """
     Parameters
@@ -145,6 +151,33 @@ def protect(
                       poison accumulator is nonzero), independent of
                       the key fold above. Off by default; only has an
                       effect when decorrelate_checks is True.
+    ptrace_guard    : Linux-only. When True, the protected stub
+                      self-attaches via ptrace(PTRACE_TRACEME,...)
+                      immediately after it loads and SHA-256-verifies
+                      gnolly/_gnolly_core.so, which blocks any debugger
+                      (gdb, strace, etc.) from attaching to the process
+                      at all, since the OS only permits one tracer per
+                      process.
+    ptrace_guard_strict : when True (default), a ptrace_guard failure
+                      always reacts like every other antidebug check
+                      (poison-mark if decorrelate_checks, else
+                      immediate exit). No effect when ptrace_guard is False.
+    ptrace_guard_heartbeat : when True (default), a detached pthread in
+                      the core .so periodically
+                      re-reads /proc/<pid>/status's TracerPid and
+                      hard-kills the process (_exit() in C) the moment
+                      it reads back 0. No effect when ptrace_guard
+                      is False.
+    ptrace_guard_heartbeat_min_delay, ptrace_guard_heartbeat_max_delay :
+                      randomized re-check interval in seconds (default
+                      gnolly.ptrace_guard.DEFAULT_HEARTBEAT_MIN_DELAY/
+                      MAX_DELAY, 0.0005-0.002, i.e. 0.5-2ms -> edit
+                      those two constants directly to change the
+                      project-wide default). This bounds how long an
+                      attacker can act against the *running* process
+                      after detaching it, not how long they can inspect
+                      memory while it's stopped. No effect when
+                      ptrace_guard_heartbeat is False.
     """
     def _log(msg: str) -> None:
         if verbose:
@@ -245,6 +278,11 @@ def protect(
         module_mode     = module_mode,
         decorrelate_checks = decorrelate_checks,
         poison_watchdog = poison_watchdog,
+        ptrace_guard = ptrace_guard,
+        ptrace_guard_strict = ptrace_guard_strict,
+        ptrace_guard_heartbeat = ptrace_guard_heartbeat,
+        ptrace_guard_heartbeat_min_delay = ptrace_guard_heartbeat_min_delay,
+        ptrace_guard_heartbeat_max_delay = ptrace_guard_heartbeat_max_delay,
     )
     if minify:
         _log("Minifying stub …")
