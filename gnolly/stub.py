@@ -8,7 +8,7 @@ Stub hardening layers:
   2. Custom XOR-int string encoding  (no fromhex/decode pattern anywhere)
   3. code blob splitting          (4-11 random-length chunks)
   4. __import__ obfuscation          (no plain import statements)
-  5. getattr method access           (no .sha256 / .pbkdf2_hmac / .MODE_GCM)
+  5. getattr method access           (no .sha256 / Argon2id / .MODE_GCM)
   6. Dead assignment injection       (crypto-random junk between real lines)
   7. Control-flow state machine      (while loop with numeric dispatch dict)
   8. Integer XOR obfuscation         (no plain numeric constants)
@@ -164,8 +164,8 @@ def generate_stub(
         ptrace(PTRACE_TRACEME,...) immediately after it loads and
         SHA-256-verifies gnolly/_gnolly_core.so
     ptrace_guard_heartbeat : when True (default, and ptrace_guard
-        succeeded at runtime), the .so starts a detached pthread that periodically 
-        re-reads /proc/<pid>/status's TracerPid for the thread that originally self-attached; 
+        succeeded at runtime), the .so starts a detached pthread that periodically
+        re-reads /proc/<pid>/status's TracerPid for the thread that originally self-attached;
         if it ever reads back 0, the self-trace was removed and the process is killed outright via
         _exit() in C, since by then the decryption key has already
         been derived and there's no later key-fold point for a soft
@@ -316,7 +316,6 @@ def generate_stub(
 
     # Precompute all encoded strings needed across states
     sha256_enc   = _enc_str('sha256', str_key)
-    pbkdf2_enc   = _enc_str('pbkdf2_hmac', str_key)
     exit_enc     = _enc_str('exit', str_key)
     environ_enc  = _enc_str('environ', str_key)
     getpass_enc  = _enc_str('getpass', str_key)
