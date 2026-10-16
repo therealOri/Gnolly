@@ -45,6 +45,7 @@ import lzma
 import bz2
 
 from Crypto.Cipher import AES
+from argon2.low_level import hash_secret_raw as _argon2_hash_secret_raw, Type as _Argon2Type
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -52,12 +53,27 @@ from Crypto.Cipher import AES
 cdef bytes _MAGIC_AAD  = b'GNLY\x02\x00'
 cdef int   _HEADER_LEN = 6 + 32 + 12 + 16   # magic+ver + salt + iv + tag
 
+# Must mirror gnolly/crypto.py's Argon2id parameters exactly -> any drift
+# between protect-time (crypto.py) and run-time (here) silently derives a
+# different key, which AES-GCM then reports as "wrong key" on every file.
+cdef int _ARGON2_TIME_COST   = 3
+cdef int _ARGON2_MEMORY_COST = 65536   # KiB (64 MiB)
+cdef int _ARGON2_PARALLELISM = 4
+
 
 # ── Key derivation ────────────────────────────────────────────────────────────
 
-cdef bytes _pbkdf2_key(bytes password, bytes salt):
-    """PBKDF2-HMAC-SHA256, 600 000 iterations → 32-byte key."""
-    return hashlib.pbkdf2_hmac('sha256', password, salt, 600_000, dklen=32)
+cdef bytes _argon2_key(bytes password, bytes salt):
+    """Argon2id, time_cost=3 / memory_cost=64MiB / parallelism=4 → 32-byte key."""
+    return _argon2_hash_secret_raw(
+        secret=password,
+        salt=salt,
+        time_cost=_ARGON2_TIME_COST,
+        memory_cost=_ARGON2_MEMORY_COST,
+        parallelism=_ARGON2_PARALLELISM,
+        hash_len=32,
+        type=_Argon2Type.ID,
+    )
 
 
 # ── Decompression ─────────────────────────────────────────────────────────────
@@ -392,7 +408,7 @@ def gnolly_run(
         key = key_input.encode('utf-8')
 
     # ── 2. KDF ────────────────────────────────────────────────────────────────
-    cdef bytes derived = _pbkdf2_key(key, salt)
+    cdef bytes derived = _argon2_key(key, salt)
     key = b''
 
     # ── 3. AES-256-GCM decrypt ────────────────────────────────────────────────
