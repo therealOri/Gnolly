@@ -9,7 +9,7 @@ Orchestrates the full Gnolly protection pipeline:
     ├─ [2] VM translate         source -> GIR bytecode (true VM, no marshal)
     ├─ [3] VM opcode shuffle    per-file GIR opcode permutation
     ├─ [4] Compress             zlib/lzma/bz2, best wins
-    ├─ [5] Encrypt              AES-256-GCM + PBKDF2-HMAC-SHA256 (600k iters)
+    ├─ [5] Encrypt              AES-256-GCM + Argon2id (t=3, m=64MiB, p=4)
     ├─ [6] Custom encode        per-file alphabet keyed from password + random salt, unique every run
     └─ [7] Stub generation      obfuscated I/l/O/0 loader
               │
@@ -235,7 +235,7 @@ def protect(
     compressed = compress(packed)
 
     # Stage 5: Encrypt
-    _log("Stage 5/5  Encryption (AES-256-GCM / PBKDF2-600k) …")
+    _log("Stage 5/5  Encryption (AES-256-GCM / Argon2id) …")
     _effective_password = password
     if machine_fingerprint is not None:
         import hmac as _hmac
