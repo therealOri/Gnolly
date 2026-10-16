@@ -279,7 +279,6 @@ def protect(
         decorrelate_checks = decorrelate_checks,
         poison_watchdog = poison_watchdog,
         ptrace_guard = ptrace_guard,
-        ptrace_guard_strict = ptrace_guard_strict,
         ptrace_guard_heartbeat = ptrace_guard_heartbeat,
         ptrace_guard_heartbeat_min_delay = ptrace_guard_heartbeat_min_delay,
         ptrace_guard_heartbeat_max_delay = ptrace_guard_heartbeat_max_delay,
