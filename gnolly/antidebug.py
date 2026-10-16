@@ -166,7 +166,7 @@ def generate_timing_check_lines(
 ) -> list[str]:
     """
     This closes the timing gate opened near the top of the stub (vt2, returned
-    by generate_antidebug_lines). PBKDF2 derivation happens
+    by generate_antidebug_lines). Argon2id derivation happens
     inside the compiled core (gnolly_run) and isn't independently
     visible to the Python-level stub, so this brackets everything the
     stub itself does between opening the gate and handing off to the
