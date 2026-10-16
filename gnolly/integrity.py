@@ -9,7 +9,7 @@ applied to the compiled extensions instead:
     core_hash = sha256(_gnolly_core.so bytes)
     vm_hash   = sha256(_gnolly_vm.so bytes)
     effective_password = HMAC(DOMAIN || core_hash || vm_hash, password)
-    derived_key = PBKDF2(effective_password, salt)
+    derived_key = Argon2id(effective_password, salt)
 
 There is no explicit "does the hash match" branch anywhere in this chain,
 and nothing an attacker can patch to bypass it. A tampered .so silently
