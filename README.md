@@ -69,8 +69,8 @@ your_script.py
     │
     ├─ [4] Compression          —   zlib / lzma / bz2, best result is used
     │
-    ├─ [5] Encryption           —   AES-256-GCM + PBKDF2-HMAC-SHA256
-    │                               (600,000 iterations, random salt+IV per file)
+    ├─ [5] Encryption           —   AES-256-GCM + Argon2id
+    │                               (t=3, m=64MiB, p=4, random salt+IV per file)
     │
     ├─ [6] Custom encoding      —   per-file alphabet keyed from password + random
     │                               salt, unique every run
@@ -150,7 +150,7 @@ Two compiled C extensions are required for every protected file:
 
 | File | Role |
 |---|---|
-| `_gnolly_core.<suffix>.so` | AES-256-GCM decryption, PBKDF2 key derivation, anti-debug |
+| `_gnolly_core.<suffix>.so` | AES-256-GCM decryption, Argon2id key derivation, anti-debug |
 | `_gnolly_vm.<suffix>.so` | GIR interpreter: executes protected code without CPython's eval loop |
 
 > Both must be present at runtime. If either is missing, the protected script just exits silently.
@@ -370,7 +370,7 @@ gnolly fingerprint                                    # run on target machine
 gnolly protect --bind-fp <hex> your_script.py        # run on build machine
 ```
 
-The machine fingerprint is folded into the PBKDF2 key derivation. On the wrong machine, AES-GCM authentication fails silently, the protected file exits with code 1 and no information is disclosed.
+The machine fingerprint is folded into the Argon2id key derivation. On the wrong machine, AES-GCM authentication fails silently, the protected file exits with code 1 and no information is disclosed.
 
 This composes with the `.so` integrity binding described [above](#versioning-the-so-pair-is-part-of-the-protected-artifact-not-a-separate-dependency): both foldings apply in sequence, so a wrong machine *or* a tampered/mismatched `.so` pair each independently break the key.
 
@@ -385,13 +385,13 @@ This composes with the `.so` integrity binding described [above](#versioning-the
 | No source in output | Source is compiled to GIR before encryption; plaintext never written to disk |
 | No key in output | Key is always external -> env var or interactive prompt |
 | Tamper detection (blob) | AES-256-GCM authentication tag -> any modification of the encrypted code fails decryption outright |
-| Tamper detection (`.so` files) | Both `.so` hashes are folded into the PBKDF2 key derivation (see `gnolly/integrity.py`); a modified `.so` silently derives a different key and fails GCM authentication. A separate, obfuscated hash pre-check gives a cleaner early exit for mismatches, but is not itself the security boundary, the key fold is what actually can't be bypassed by patching a comparison. |
+| Tamper detection (`.so` files) | Both `.so` hashes are folded into the Argon2id key derivation (see `gnolly/integrity.py`); a modified `.so` silently derives a different key and fails GCM authentication. A separate, obfuscated hash pre-check gives a cleaner early exit for mismatches, but is not itself the security boundary, the key fold is what actually can't be bypassed by patching a comparison. |
 | Unique per-file encoding | GIR opcode shuffle keyed per file; same source -> different binary blob every run |
 | No CPython eval loop | Protected code runs in `_gnolly_vm`'s own Cython stack machine, never via `ceval.c` |
 | No `marshal` | GIR is a custom binary format; `marshal.loads` is never called |
 | `sys.settrace` blocked | VM execution produces zero trace events -> Python-level debuggers cannot single-step |
 | `sys.monitoring` suppressed | 3.12+ monitoring events suppressed around decrypt and dispatch |
-| Strong KDF | PBKDF2-HMAC-SHA256, 600,000 iterations (OWASP 2024 recommendation for SHA-256) |
+| Strong KDF | Argon2id, t=3 / m=64MiB / p=4 (RFC 9106 memory-constrained recommendation) |
 | No `__import__` in stub | All imports routed through an obfuscated `__builtins__` alias |
 | No external network calls | Protected file is fully self-contained; no phone-home, no activation |
 | Machine binding | `--bind` folds a hardware fingerprint into the KDF: wrong machine -> wrong key -> GCM auth fails |
@@ -437,7 +437,7 @@ __ __
 |---|---|---|---|---|---|
 | **Price** | Free, open-source | Free tier limited; Pro ~$100 | Free | Free / €299 Commercial | Free |
 | **Encryption** | AES-256-GCM | Varies by version | None | None | None |
-| **KDF** | PBKDF2-HMAC-SHA256, 600k rounds | Varies | — | — | — |
+| **KDF** | Argon2id, t=3/m=64MiB/p=4 | Varies | — | — | — |
 | **True VM (not CPython eval)** | ✅ | ✅ Pro only | ❌ | ❌ | ❌ |
 | **Anti-debug** | ✅ Python + C layer (+ optional ptrace self-attach on Linux) | ✅ | ❌ | ❌ | ❌ |
 | **sys.settrace fires 0 events** | ✅ | ✅ | ❌ | ❌ | ❌ |
@@ -483,7 +483,7 @@ Python-source obfuscation -> everything currently in `flatten.py`, `selfhash.py`
 |---|---|---|---|---|
 | ✅ | Delayed / decorrelated failure reaction | Python | Low | High |
 | ✅ | ptrace self-attach (`--ptrace`, opt-in) | `.so` (Linux) | Low | High |
-| ⏳ | Argon2id key derivation | `.so` / crypto | Low-Med | Medium |
+| ✅ | Argon2id key derivation | `.so` / crypto | Low-Med | Medium |
 | ⏳ | Extra python trigger primitives (`weakref`, `atexit`, `__del__`, frame inspection) | Python | Low | Medium |
 | ⏳ | Continuous (not just startup) integrity checks | Python + `.so` | Medium | High |
 | ⏳ | Cross-checking checks | Python | Medium | Medium-High |
