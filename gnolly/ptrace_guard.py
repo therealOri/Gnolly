@@ -63,12 +63,10 @@ def generate_ptrace_guard_call_lines(
     h_sys: str,       # name of the sys module handle in the stub
     str_key: bytes,   # str encoding key
     obn,              # obf_int callable
-    core_var: str,    # stub variable already holding the loaded,
-                       # hash-verified gnolly._gnolly_core module
+    core_var: str,    # stub variable already holding the loaded & hash-verified gnolly._gnolly_core module
 
     h_blt: str | None = None,  # builtins module handle -> obfuscates None/True/False
     poison_var: str | None = None,  # see gnolly.poison
-    strict: bool = True,
     heartbeat: bool = True,
     min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
     max_delay: float = DEFAULT_HEARTBEAT_MAX_DELAY,
@@ -77,13 +75,10 @@ def generate_ptrace_guard_call_lines(
     Return the stub lines that call _gnolly_core._gnolly_ptrace_guard()
     and react to its result.
 
-    strict : when True (default), a self-attach failure is treated like
-        every other antidebug.py check (poison-mark if decorrelated,
-        else an immediate exit) When False, a failure only poison-marks
-        when the decorrelated accumulator is active (poison_var is not
-        None) and is otherwise a silent/non operational. Use this for a
-        deployment target you've confirmed denies ptrace outright
-        (e.g. a seccomp profile without CAP_SYS_PTRACE).
+    A self-attach failure is always treated like every other
+    antidebug.py check (poison-mark if decorrelated, else an immediate
+    exit) -> unconditional, not configurable.
+
     heartbeat : when True (default), and the initial self-attach
         succeeds, the .so starts its own detached pthread that
         periodically re-verifies that the trace is still in place.
@@ -102,15 +97,10 @@ def generate_ptrace_guard_call_lines(
             return name
         return f"getattr({h_blt}, {s(name)})"
 
-    hard_react = (
+    react = (
         poison_mark_expr(poison_var, obn) if poison_var is not None
         else f"getattr({h_sys}, {s('exit')})({obn(1)})"
     )
-    soft_react = (
-        poison_mark_expr(poison_var, obn) if poison_var is not None
-        else "pass"
-    )
-    react = hard_react if strict else soft_react
 
     _rng = random.Random(secrets.randbits(64))
     _used: set = set()
