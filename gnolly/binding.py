@@ -5,20 +5,20 @@ Machine/platform binding.
 
 How it works
 ------------
-The machine fingerprint is silently folded into the PBKDF2 salt before
+The machine fingerprint is silently folded into the Argon2id salt before
 key derivation.  The encrypted payload can only be decrypted on a machine
 whose fingerprint produces the same derived key.
 
 At protect time:
     fp = collect_fingerprint()               # developer supplies target fp
     effective_salt = HMAC(salt, fp)          # fold fp into salt
-    derived_key = PBKDF2(password, effective_salt)
+    derived_key = Argon2id(password, effective_salt)
     encrypt(payload, derived_key)
 
 At runtime:
     fp = collect_fingerprint()               # this machine's fp
     effective_salt = HMAC(salt, fp)
-    derived_key = PBKDF2(password, effective_salt)
+    derived_key = Argon2id(password, effective_salt)
     decrypt(payload, derived_key)            # GCM auth fails if fp wrong
 
 There is no explicit "machine check". The wrong fingerprint silently produces
@@ -143,7 +143,7 @@ def collect_fingerprint(*, require: bool = False) -> bytes | None:
 def bind_salt(salt: bytes, fingerprint: bytes) -> bytes:
     """
     Derive a machine-bound salt by folding the fingerprint into the
-    original PBKDF2 salt via HMAC-SHA256.
+    original Argon2id salt via HMAC-SHA256.
 
     Parameters
     ----------
