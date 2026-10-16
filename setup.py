@@ -84,6 +84,7 @@ setup(
     python_requires=">=3.11",
     install_requires=[
         "pycryptodome>=3.19.0",
+        "argon2-cffi>=23.1.0",
         "Cython>=3.2.5",
         "setuptools>=82.0.1",
     ],
