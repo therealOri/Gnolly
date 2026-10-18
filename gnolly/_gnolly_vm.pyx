@@ -72,10 +72,17 @@ cdef int CO_HAS_FREE = 0x08
 # ---------------------------------------------------------------------------
 
 cdef class _Reader:
-    cdef bytes buf
+    # A read-only typed memoryview rather than bytes that accepts bytes,
+    # bytearray, or a memoryview as-is via the buffer protocol
+    # This matters for callers that keep the decrypted GIR blob in
+    # a bytearray specifically so it can be explicitly zeroed after use.
+    # And if this reader forced it into bytes first, that would silently
+    # create one more immutable, unwipeable copy of the blob right at the
+    # call boundary.
+    cdef const unsigned char[:] buf
     cdef Py_ssize_t pos
 
-    def __init__(self, bytes buf, Py_ssize_t pos=0):
+    def __init__(self, buf not None, Py_ssize_t pos=0):
         self.buf = buf
         self.pos = pos
 
@@ -98,7 +105,9 @@ cdef class _Reader:
         return <long long>(raw >> 1)
 
     cdef bytes read_bytes(self, Py_ssize_t n):
-        cdef bytes out = self.buf[self.pos:self.pos + n]
+        # Materialises an independent bytes object for just this
+        # one slice without ever copying the whole underlying buffer.
+        cdef bytes out = bytes(self.buf[self.pos:self.pos + n])
         self.pos += n
         return out
 
@@ -251,9 +260,14 @@ def _read_code(_Reader r, dict table):
     return code
 
 
-def deserialize_vm_blob(bytes blob, bytes table_blob):
+def deserialize_vm_blob(blob, table_blob):
     """
     Deserialise a GIR module blob.
+
+    blob, table_blob: any bytes-like object (bytes, bytearray, or
+        memoryview) is accepted as-is via the buffer protocol, not copied
+        up front. Callers that hold these in a bytearray so they can be
+        explicitly wiped after use can pass said bytearray straight through.
 
     table_blob: 2*GIR_TABLE_SIZE-byte reverse opcode table, big-endian u16
                 pairs (index = shuffled opcode value -> value = real GIR
@@ -1339,13 +1353,18 @@ def run_frame(GIRCodeObj code, list fastlocals, list cells, dict globs, dict bui
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def vm_exec_module(bytes blob, bytes table_blob, dict globs=None):
+def vm_exec_module(blob, table_blob, dict globs=None):
     """
     Deserialise and execute a GIR module blob.
 
     Equivalent to "exec(compile(source, ..., 'exec'), globs)" but the
     "compile" step is gnolly.vm_translate (done at protect-time) and
     the "exec" step is this interpreter -> CPython's eval loop is never invoked on the protected code.
+
+    blob, table_blob: bytes, bytearray, or memoryview is taken as-is
+        and is deliberately NOT typed as bytes so the
+        caller can pass a bytearray it intends to zero afterward without
+        this call forcing one more un-wipeable immutable copy into existence.
     """
     cdef GIRCodeObj code = deserialize_vm_blob(blob, table_blob)
 
