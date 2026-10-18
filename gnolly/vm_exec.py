@@ -59,13 +59,17 @@ if not _VM_LOADED:
 # Public API
 # ---------------------------------------------------------------------------
 
-def vm_exec_module(blob: bytes, table_blob: bytes, globs: dict | None = None) -> None:
+def vm_exec_module(blob: bytes | bytearray | memoryview,
+                    table_blob: bytes | bytearray | memoryview,
+                    globs: dict | None = None) -> None:
     """
     Deserialise and execute a GIR module blob inside the compiled C interpreter.
 
     Parameters
     ----------
     blob:       Encrypted+shuffled GIR bytes (output of vm_pipeline.protect_with_vm).
+                Accepts a bytearray/memoryview as-is so a caller holding the blob in a wipeable
+                bytearray can pass it straight through.
     table_blob: 256-byte reverse opcode table (index=shuffled -> value=GIR id).
     globs:      Module-level "__dict__"; created fresh if None.
 
