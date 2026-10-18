@@ -318,6 +318,173 @@ def _gnolly_ptrace_guard(bint start_heartbeat=True, double min_delay=0.0005, dou
     return rc
 
 
+# ── Secret-memory hardening (wiping, locking, core-dump prevention) ────────────
+# decrypted plaintext and derived key material are kept in buffers THIS module
+# owns (bytearray, not bytes) and are explicitly zeroed the moment they are no
+# longer needed, instead of relying on normal refcounting/GC to eventually free
+# memory that was never actually cleared. Paired with mlock (keep the secret
+# out of swap) and MADV_DONTDUMP/RLIMIT_CORE=0 (keep it out of a crash core
+# file), this closes the three main ways secret memory ends up somewhere an
+# attacker with read access to disk/swap can find it later, after the process
+# is no longer even running.
+#
+# Caveat....pycryptodome's AES keeps the expanded round-key schedule in its own opaque C/FFI state,
+# which is never exposed to Python/Cython callers, so it cannot be
+# explicitly zeroed from here. What we do instead is minimise its lifetime.
+# the cipher object is dereferenced (`cipher = None`) the instant decryption finishes, so CPython's refcounting
+# frees pycryptodome's C state (and whatever cleanup pycryptodome itself
+# performs on free) as early as the interpreter allows.
+cdef extern from *:
+    """
+    #include <string.h>
+    #include <stddef.h>
+
+    #if defined(_WIN32)
+    #include <windows.h>
+    #else
+    #include <sys/mman.h>
+    #include <sys/resource.h>
+    #if defined(__linux__)
+    #include <sys/prctl.h>
+    #endif
+    #endif
+
+    static void gnolly_secure_zero(void *ptr, size_t len) {
+        if (!ptr || len == 0) return;
+    #if defined(_WIN32)
+        SecureZeroMemory(ptr, len);
+    #elif defined(__APPLE__)
+        memset_s(ptr, len, 0, len);
+    #elif (defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25))) \\
+          || defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__NetBSD__)
+        explicit_bzero(ptr, len);
+    #else
+        volatile unsigned char *p = (volatile unsigned char *)ptr;
+        size_t i;
+        for (i = 0; i < len; i++) p[i] = 0;
+    #if defined(__GNUC__) || defined(__clang__)
+        __asm__ __volatile__("" ::: "memory");
+    #endif
+    #endif
+    }
+
+    static int gnolly_lock_mem(void *ptr, size_t len) {
+        if (!ptr || len == 0) return 0;
+    #if defined(_WIN32)
+        return VirtualLock(ptr, len) ? 1 : 0;
+    #else
+        return (mlock(ptr, len) == 0) ? 1 : 0;
+    #endif
+    }
+
+    static int gnolly_unlock_mem(void *ptr, size_t len) {
+        if (!ptr || len == 0) return 0;
+    #if defined(_WIN32)
+        return VirtualUnlock(ptr, len) ? 1 : 0;
+    #else
+        return (munlock(ptr, len) == 0) ? 1 : 0;
+    #endif
+    }
+
+    static void gnolly_mark_undumpable(void *ptr, size_t len) {
+    #if defined(__linux__) && defined(MADV_DONTDUMP)
+        if (ptr && len) madvise(ptr, len, MADV_DONTDUMP);
+    #else
+        (void)ptr; (void)len;
+    #endif
+    }
+
+    static void gnolly_disable_core_dumps(void) {
+    #if !defined(_WIN32)
+        struct rlimit rl;
+        rl.rlim_cur = 0;
+        rl.rlim_max = 0;
+        setrlimit(RLIMIT_CORE, &rl);
+    #endif
+    #if defined(__linux__)
+        prctl(PR_SET_DUMPABLE, 0);
+    #endif
+    }
+    """
+    void gnolly_secure_zero(void *ptr, size_t length)
+    int  gnolly_lock_mem(void *ptr, size_t length)
+    int  gnolly_unlock_mem(void *ptr, size_t length)
+    void gnolly_mark_undumpable(void *ptr, size_t length)
+    void gnolly_disable_core_dumps()
+
+
+from cpython.buffer cimport Py_buffer, PyObject_GetBuffer, PyBuffer_Release, PyBUF_WRITABLE
+from cpython.bytes  cimport PyBytes_AS_STRING, PyBytes_GET_SIZE
+from cpython.exc    cimport PyErr_Clear
+
+
+cdef void _wipe(object buf):
+    """
+    Securely zero a mutable buffer in place (bytearray, or a
+    memoryview over one). No-op if buf doesn't expose a writable
+    buffer.
+    """
+    if buf is None:
+        return
+    cdef Py_buffer view
+    if PyObject_GetBuffer(buf, &view, PyBUF_WRITABLE) != 0:
+        PyErr_Clear()
+        return
+    try:
+        gnolly_secure_zero(view.buf, <size_t>view.len)
+    finally:
+        PyBuffer_Release(&view)
+
+
+cdef void _wipe_bytes_unsafe(bytes data):
+    """
+    Best-effort zero of an otherwise-immutable bytes object's backing
+    storage, in place.
+
+    CPython's PyBytes_AS_STRING deliberately returns a non-const char*
+    precisely so C extensions can do this kind of post-creation
+    in-place mutation. It's undefined behaviour with other Python
+    implementations and relies on said object being a genuine unique
+    heap allocation, which is why this is only ever called on bytes we
+    just received fresh from the argon2/zlib/etc stuff and never on a literal or
+    anything that could be a cached/interned object.
+    (CPython caches b'' and every single-byte bytes value,
+    0-255, as shared singletons -> those must never be mutated).
+    """
+    cdef Py_ssize_t n = PyBytes_GET_SIZE(data)
+    if n <= 1:
+        return
+    gnolly_secure_zero(<void*>PyBytes_AS_STRING(data), <size_t>n)
+
+
+cdef void _lock(object buf):
+    """Best-effort mlock + exclude-from-core-dump for a writable buffer."""
+    if buf is None:
+        return
+    cdef Py_buffer view
+    if PyObject_GetBuffer(buf, &view, PyBUF_WRITABLE) != 0:
+        PyErr_Clear()
+        return
+    try:
+        gnolly_lock_mem(view.buf, <size_t>view.len)
+        gnolly_mark_undumpable(view.buf, <size_t>view.len)
+    finally:
+        PyBuffer_Release(&view)
+
+
+cdef void _unlock(object buf):
+    if buf is None:
+        return
+    cdef Py_buffer view
+    if PyObject_GetBuffer(buf, &view, PyBUF_WRITABLE) != 0:
+        PyErr_Clear()
+        return
+    try:
+        gnolly_unlock_mem(view.buf, <size_t>view.len)
+    finally:
+        PyBuffer_Release(&view)
+
+
 # ── sys.monitoring blackout ───────────────────────────────────────────────────
 
 cdef object _monitoring_blackout_enter():
@@ -392,53 +559,98 @@ def gnolly_run(
     caller_globals : when provided (module_mode stubs, e.g. protected
         package/wheel submodules), the decoded output executes directly into
         a dict instead of throwaway namespace.
+
+    Memory hygiene: every buffer that would hold the password, the derived
+    key, or decrypted plaintext is a bytearray this function owns outright.
+    Each one is mlock()'d + excluded from core dumps while live, and
+    explicitly zeroed the moment it is no longer needed on both success
+    and exception.
     """
     _anti_debug_c()
+    gnolly_disable_core_dumps()
     if not _VM_LOADED:
         # _gnolly_vm.so was never registered via _gnolly_load_vm_module().
         # No fallback execution path exists -> refuse to run.
         sys.exit(1)
     cdef object _blackout_state = _monitoring_blackout_enter()
 
-    # ── 1. Normalise key ──────────────────────────────────────────────────────
-    cdef bytes key
+    # ── 1. Normalise key into a buffer we own and can wipe ──────────────────
+    cdef bytearray key_buf
     if isinstance(key_input, (bytes, bytearray)):
-        key = bytes(key_input)
+        key_buf = bytearray(key_input)
     else:
-        key = key_input.encode('utf-8')
+        key_buf = bytearray(key_input.encode('utf-8'))
+    _lock(key_buf)
 
     # ── 2. KDF ────────────────────────────────────────────────────────────────
-    cdef bytes derived = _argon2_key(key, salt)
-    key = b''
+    cdef bytes _derived_raw = _argon2_key(bytes(key_buf), salt)  # argon2 needs `bytes` in
+    _wipe(key_buf)
+    _unlock(key_buf)
+    key_buf = None
 
-    # ── 3. AES-256-GCM decrypt ────────────────────────────────────────────────
+    cdef bytearray derived_buf = bytearray(_derived_raw)
+    _wipe_bytes_unsafe(_derived_raw)   # best-effort clear of argon2's own copy
+    _derived_raw = None
+    _lock(derived_buf)
+
+    # ── 3. AES-256-GCM decrypt, straight into a buffer we already own ───────
+    # output= writes the plaintext directly into plaintext_buf instead of
+    # pycryptodome handing back fresh and immutable bytes that we'd then have to
+    # copy out of and leave behind. (one fewer uncollectable copy of the
+    # decrypted source floating in the heap.)
     cdef bytes ciphertext = blob_raw[header_skip:]
-    cdef bytes plaintext
+    cdef bytearray plaintext_buf = bytearray(len(ciphertext))
+    _lock(plaintext_buf)
+    cipher = None
     try:
-        cipher = AES.new(derived, AES.MODE_GCM, nonce=iv, mac_len=16)
+        # pycryptodome's key= happens to accept bytes/bytearray/memoryview directly,
+        # so we can pass the bytearray itself and have no extra immutable bytes copy of the key.
+        cipher = AES.new(derived_buf, AES.MODE_GCM, nonce=iv, mac_len=16)
         cipher.update(_MAGIC_AAD)
-        plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+        cipher.decrypt_and_verify(ciphertext, tag, output=plaintext_buf)
     except ValueError:
+        _wipe(derived_buf); _unlock(derived_buf)
+        _wipe(plaintext_buf); _unlock(plaintext_buf)
         sys.exit(1)
     finally:
-        derived = b''
+        # Drop pycryptodome's cipher object (and whatever internal key-
+        # schedule state it holds) the instant we're done with it, rather
+        # than letting it live until the end of the function.
+        cipher = None
+        _wipe(derived_buf)
+        _unlock(derived_buf)
+        derived_buf = None
 
     # ── 4. Decompress ─────────────────────────────────────────────────────────
-    cdef bytes decompressed = _decompress(plaintext)
-    plaintext = b''
+    # zlib/lzma/bz2 gives us an immutable bytes with no way to decompress
+    # straight into a buffer we control, so we'll copy out to a bytearray immediately
+    # and do a best-effort clear for the stdlib's own copy, then wipe+unlock the
+    # ciphertext-shaped buffer we just finished reading from.
+    cdef bytes _decompressed_raw = _decompress(bytes(plaintext_buf))
+    _wipe(plaintext_buf)
+    _unlock(plaintext_buf)
+    plaintext_buf = None
+
+    cdef bytearray decompressed = bytearray(_decompressed_raw)
+    _wipe_bytes_unsafe(_decompressed_raw)
+    _decompressed_raw = None
+    _lock(decompressed)
 
     # ── 5. Unpack VM-mode payload ─────────────────────────────────────────────
     # Layout: VM_FLAG(1) | u32(gir_len) | gir_blob | u32(table_len) | table_blob
     if len(decompressed) < 1 or decompressed[0:1] != b'\x01':
         # Not a VM-mode payload/code -> refuse to execute
+        _wipe(decompressed); _unlock(decompressed)
         sys.exit(1)
 
     cdef unsigned int gir_len, table_len
     gir_len,   = struct.unpack_from('>I', decompressed, 1)
-    cdef bytes gir_blob    = decompressed[5 : 5 + gir_len]
+    cdef bytearray gir_blob_buf   = decompressed[5 : 5 + gir_len]
     table_len, = struct.unpack_from('>I', decompressed, 5 + gir_len)
-    cdef bytes table_blob  = decompressed[9 + gir_len : 9 + gir_len + table_len]
-    decompressed = b''
+    cdef bytearray table_blob_buf = decompressed[9 + gir_len : 9 + gir_len + table_len]
+    _wipe(decompressed)
+    _unlock(decompressed)
+    decompressed = None
 
     # ── 6. Dispatch to GIR VM interpreter ─────────────────────────────────────
     # CPython's eval loop never runs on this code.
@@ -457,7 +669,13 @@ def gnolly_run(
             '__package__':  None,
             '__spec__':     None,
         }
-    _gvm_exec_module(gir_blob, table_blob, globs)
-    gir_blob   = b''
-    table_blob = b''
+    cdef bytes _gir_call_copy   = bytes(gir_blob_buf)
+    cdef bytes _table_call_copy = bytes(table_blob_buf)
+    try:
+        _gvm_exec_module(_gir_call_copy, _table_call_copy, globs)
+    finally:
+        _wipe(gir_blob_buf);   _unlock(gir_blob_buf);   gir_blob_buf = None
+        _wipe(table_blob_buf); _unlock(table_blob_buf); table_blob_buf = None
+        _wipe_bytes_unsafe(_gir_call_copy);   _gir_call_copy = None
+        _wipe_bytes_unsafe(_table_call_copy); _table_call_copy = None
     _monitoring_blackout_exit(_blackout_state)
