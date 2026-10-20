@@ -31,6 +31,7 @@ from .ptrace_guard import (
     DEFAULT_HEARTBEAT_MIN_DELAY, DEFAULT_HEARTBEAT_MAX_DELAY,
 )
 from .binding_stub import generate_binding_lines
+from .memwipe_stub import generate_wipe_setup_lines, wipe_call
 from .import_hook  import generate_import_hook_lines, get_core_so_hash, get_vm_so_hash
 from .namegen import random_confusable_name
 from .flatten import flatten_source
@@ -203,6 +204,11 @@ def generate_stub(
 
     # XOR/decode helper names
     hx_fn    = N[47]; imp_fn = N[49]
+
+    # Secret-bytes wipe helper (see gnolly.memwipe_stub)
+    h_ctypes   = N[132]; pbs_var    = N[133]
+    memset_var = N[134]; wv_fn      = N[135]
+    ig_tmpkey  = N[136]  # scratch for the integrity-fold swap-and-wipe
 
     # Loop/temp vars
     v = N[50:]
@@ -403,8 +409,29 @@ def generate_stub(
         a(_stl2)
     a("")
 
+    # ── SECRET-BYTES WIPE HELPER (see gnolly.memwipe_stub) ───────────────────
+    # Set up before any key material exists, so every fold below can use
+    # it. Degrades to a silent no-op (never raises, never blocks the
+    # protected program from running) if ctypes isn't available.
+    pop_enc = _enc_str('pop', str_key)
+    for _wl in generate_wipe_setup_lines(
+            s_fn=s_fn, str_key=str_key, imp_fn=imp_fn,
+            h_ctypes=h_ctypes, pbs_var=pbs_var, memset_var=memset_var,
+            wv_fn=wv_fn, rng=rng):
+        a(_wl)
+    a("")
+
     # ── INLINE STATE 2: get key ───────────────────────────────────────────────
-    a(f"{sm_key} = getattr({h_os}, {s_fn}({environ_enc})).get({s_fn}({gnolly_key_enc}))")
+    # .pop() rather than .get(): removes GNOLLY_KEY from the live
+    # os.environ the instant it's read, rather than leaving it sitting
+    # there in a dict for any other code running in this interpreter (or any
+    # child process this program later spawns) could read.
+    # Note: This does NOT remove it from /proc/<pid>/environ on
+    # Linux -> that reflects the original environment block the kernel
+    # set up at exec() time. And is a separate copy of the os.environ at
+    # startup, and no call made after the process has already started
+    # can reach back and scrub it.
+    a(f"{sm_key} = getattr(getattr({h_os}, {s_fn}({environ_enc})), {s_fn}({pop_enc}))({s_fn}({gnolly_key_enc}), " + "None)")
     a(f"if {sm_key}:")
     a("    try: " + sm_key + " = " + hx_fn + "(" + em(sm_key, "strip") + ")")
     a(f"    except Exception: {sm_key} = " + sing("None"))
@@ -422,7 +449,7 @@ def generate_stub(
         for _bl in generate_binding_lines(
                 s_fn=s_fn, b_fn=b_fn, h_sys=h_sys, h_os=h_os,
                 sm_key=sm_key, str_key=str_key, byt_key=byt_key,
-                obn=obn, N=N, rng=rng, imp_fn=imp_fn):
+                obn=obn, N=N, rng=rng, imp_fn=imp_fn, wv_fn=wv_fn):
             a(_bl)
 
     # ── CYTHON IMPORT HOOKS -> both .so files required ─────────────────────────
@@ -491,10 +518,12 @@ def generate_stub(
         _integrity_domain_enc = _enc_bytes_as_str(b'gnolly-integrity-bind-v1:', byt_key)
         _hmac_var = N[130]
         a(f"{_hmac_var} = {imp_fn}({s_fn}({_enc_str('hmac', str_key)}))")
+        a(f"{ig_tmpkey} = {sm_key}")
         a(f"{sm_key} = getattr({_hmac_var}, {s_fn}({_enc_str('new', str_key)}))("
           f"{b_fn}({_integrity_domain_enc}) + {_core_hash_var} + {_vm_hash_var}, "
-          f"{sm_key}, getattr({h_hash}, {s_fn}({sha256_enc})))"
+          f"{ig_tmpkey}, getattr({h_hash}, {s_fn}({sha256_enc})))"
           f".digest()")
+        a(wipe_call(wv_fn, ig_tmpkey))
         a("")
 
         # ── CLOSE CHECK 5: fast timing gate ("too fast" = mocked/replayed) ─────
@@ -508,7 +537,7 @@ def generate_stub(
         if poison_var is not None:
             for _pfl in generate_poison_fold_lines(
                     poison_var, sm_key, h_hash, _hmac_var,
-                    s_fn, b_fn, str_key, byt_key, obn):
+                    s_fn, b_fn, str_key, byt_key, obn, wv_fn=wv_fn):
                 a(_pfl)
             a("")
 
@@ -525,6 +554,12 @@ def generate_stub(
             a(f"    {obn(blob_header_skip)}, {b_fn}({alp_enc}), {b_fn}({xk_enc}), globals())")
         else:
             a(f"    {obn(blob_header_skip)}, {b_fn}({alp_enc}), {b_fn}({xk_enc}))")
+        # cr_var() (gnolly_run) returns only after the protected program's
+        # top-level/module code has already finished executing -> sm_key,
+        # by now the password/key folded through binding+integrity+poison,
+        # is never read again. We wipe this stub-level copy too.
+        a(wipe_call(wv_fn, sm_key))
+        a(f"{sm_key} = " + sing("None"))
     else:
         # One or both .so files not built at protect-time -> fail at runtime
         _exit_s = _enc_str(chr(115)+chr(121)+chr(115), str_key)
