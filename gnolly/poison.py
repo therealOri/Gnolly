@@ -95,11 +95,21 @@ def poison_mark_expr(poison_var: str, obn) -> str:
 def generate_poison_fold_lines(
     poison_var: str, sm_key: str, h_hash: str, hmac_var: str,
     s_fn: str, b_fn: str, str_key: bytes, byt_key: bytes, obn,
+    *,
+    wv_fn: str | None,
 ) -> list[str]:
     """
     Runtime mirror of fold_poison(): sm_key = HMAC(DOMAIN || poison_bytes, sm_key).
     hmac_var must already be bound to the imported hmac module and h_hash to the
     imported hashlib module.
+
+     wv_fn : best-effort secure-zero callable name (see
+        gnolly.memwipe_stub). That when given, the fold captures the
+        pre-fold sm_key bytes into a throwaway temp var (N[75]),
+        reassigns sm_key from that temp, and then wipes the temp right
+        after. The password-derived bytes this fold is about to
+        replace will get explicitly zeroed out, rather than just falling out of
+        scope.
     """
     lines = []
     a = lines.append
@@ -117,8 +127,15 @@ def generate_poison_fold_lines(
     v_bytes = random_confusable_name(rng, set(), length=rng.randint(7, 12))
 
     a(f"{v_bytes} = getattr({poison_var}, {s('to_bytes')})({obn(4)}, {s('big')})")
-    a(f"{sm_key} = getattr({hmac_var}, {s('new')})("
-      f"{encb(_POISON_DOMAIN)} + {v_bytes}, {sm_key}, getattr({h_hash}, {s('sha256')})).digest()")
+    if wv_fn:
+        v_tmp = random_confusable_name(rng, set(), length=rng.randint(7, 12))
+        a(f"{v_tmp} = {sm_key}")
+        a(f"{sm_key} = getattr({hmac_var}, {s('new')})("
+          f"{encb(_POISON_DOMAIN)} + {v_bytes}, {v_tmp}, getattr({h_hash}, {s('sha256')})).digest()")
+        a(f"{wv_fn}({v_tmp})")
+    else:
+        a(f"{sm_key} = getattr({hmac_var}, {s('new')})("
+          f"{encb(_POISON_DOMAIN)} + {v_bytes}, {sm_key}, getattr({h_hash}, {s('sha256')})).digest()")
     return lines
 
 
