@@ -341,12 +341,18 @@ cdef extern from *:
 
     #if defined(_WIN32)
     #include <windows.h>
-    #else
+    #elif defined(__linux__)
+    #include <unistd.h>
+    #include <sys/syscall.h>
     #include <sys/mman.h>
     #include <sys/resource.h>
-    #if defined(__linux__)
     #include <sys/prctl.h>
-    #endif
+    #else
+    /* macOS/BSD: not a current target platform for this project, kept
+       on the plain libc path (mlock/madvise/setrlimit) for portability
+       rather than hand-rolling syscalls for a platform not currently or planned to be supported. */
+    #include <sys/mman.h>
+    #include <sys/resource.h>
     #endif
 
     static void gnolly_secure_zero(void *ptr, size_t len) {
@@ -368,10 +374,16 @@ cdef extern from *:
     #endif
     }
 
+    /* Linux: raw syscall(2), not the libc mlock()/munlock() wrapper
+       symbols -> same LD_PRELOAD-can't-silently-neuter reasoning as
+       gnolly_pt_traceme() above, now applied consistently to every
+       hardening primitive in this file, not just ptrace. */
     static int gnolly_lock_mem(void *ptr, size_t len) {
         if (!ptr || len == 0) return 0;
     #if defined(_WIN32)
         return VirtualLock(ptr, len) ? 1 : 0;
+    #elif defined(__linux__)
+        return (syscall(SYS_mlock, ptr, len) == 0) ? 1 : 0;
     #else
         return (mlock(ptr, len) == 0) ? 1 : 0;
     #endif
@@ -381,28 +393,55 @@ cdef extern from *:
         if (!ptr || len == 0) return 0;
     #if defined(_WIN32)
         return VirtualUnlock(ptr, len) ? 1 : 0;
+    #elif defined(__linux__)
+        return (syscall(SYS_munlock, ptr, len) == 0) ? 1 : 0;
     #else
         return (munlock(ptr, len) == 0) ? 1 : 0;
     #endif
     }
 
+    /* Exclude this one buffer's pages from any crash dump this process
+       ever produces (Linux-only primitive on top
+       of gnolly_disable_core_dumps() below, since gdb's "gcore" and
+       similar external dump tools also honour MADV_DONTDUMP). */
     static void gnolly_mark_undumpable(void *ptr, size_t len) {
     #if defined(__linux__) && defined(MADV_DONTDUMP)
-        if (ptr && len) madvise(ptr, len, MADV_DONTDUMP);
+        if (ptr && len) syscall(SYS_madvise, ptr, len, MADV_DONTDUMP);
     #else
         (void)ptr; (void)len;
     #endif
     }
 
+    #if defined(_WIN32)
+    /* Installed by gnolly_disable_core_dumps() below. Runs ahead of
+       Windows Error Reporting's own handler -> terminate immediately
+       instead of letting WER stage a minidump of this process. */
+    static LONG WINAPI gnolly_crash_filter(EXCEPTION_POINTERS *info) {
+        (void)info;
+        TerminateProcess(GetCurrentProcess(), 1);
+        return EXCEPTION_EXECUTE_HANDLER; /* unreachable; keeps MSVC quiet */
+    }
+    #endif
+
+    /* Process-wide: refuse to ever leave a crash dump behind. (a core
+       file on Linux or a WER minidump on Windows) and (on Linux) make the
+       process non-ptrace-attachable by anything other than our own
+       earlier self-attach. */
     static void gnolly_disable_core_dumps(void) {
-    #if !defined(_WIN32)
+    #if defined(_WIN32)
+        SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
+        SetUnhandledExceptionFilter(gnolly_crash_filter);
+    #elif defined(__linux__)
+        struct rlimit rl;
+        rl.rlim_cur = 0;
+        rl.rlim_max = 0;
+        syscall(SYS_setrlimit, RLIMIT_CORE, &rl);
+        syscall(SYS_prctl, PR_SET_DUMPABLE, 0, 0, 0, 0);
+    #else
         struct rlimit rl;
         rl.rlim_cur = 0;
         rl.rlim_max = 0;
         setrlimit(RLIMIT_CORE, &rl);
-    #endif
-    #if defined(__linux__)
-        prctl(PR_SET_DUMPABLE, 0);
     #endif
     }
     """
@@ -669,13 +708,10 @@ def gnolly_run(
             '__package__':  None,
             '__spec__':     None,
         }
-    cdef bytes _gir_call_copy   = bytes(gir_blob_buf)
-    cdef bytes _table_call_copy = bytes(table_blob_buf)
+    
     try:
-        _gvm_exec_module(_gir_call_copy, _table_call_copy, globs)
+        _gvm_exec_module(gir_blob_buf, table_blob_buf, globs)
     finally:
         _wipe(gir_blob_buf);   _unlock(gir_blob_buf);   gir_blob_buf = None
         _wipe(table_blob_buf); _unlock(table_blob_buf); table_blob_buf = None
-        _wipe_bytes_unsafe(_gir_call_copy);   _gir_call_copy = None
-        _wipe_bytes_unsafe(_table_call_copy); _table_call_copy = None
     _monitoring_blackout_exit(_blackout_state)
