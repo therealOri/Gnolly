@@ -18,7 +18,7 @@ from .strcodec import _enc_str, _enc_bytes_as_str
 
 def generate_binding_lines(
     s_fn: str,       # stub's str-decoder function name
-    b_fn: str,       # stub's bytes-decoder function name  
+    b_fn: str,       # stub's bytes-decoder function name
     h_sys: str,      # sys module handle
     h_os: str,       # os module handle
     sm_key: str,     # the key variable to fold fingerprint into
@@ -28,6 +28,8 @@ def generate_binding_lines(
     N: list,         # name pool (we use N[60:80] for local vars)
     rng: random.Random | None = None,  # for single-char comprehension names
     imp_fn: str = "__import__",  # obfuscated __import__ handle from the stub
+    *,
+    wv_fn: str | None,  # secure-zero callable (see gnolly.memwipe_stub) -> REQUIRED, see below
 ) -> list[str]:
     """
     Return lines of Python source that:
@@ -37,6 +39,14 @@ def generate_binding_lines(
     These lines go BEFORE the KDF call in the stub.
     The HMAC fold modifies sm_key in place:
         sm_key = HMAC(fingerprint, sm_key)
+
+     wv_fn : best-effort secure-zero callable name (see
+        gnolly.memwipe_stub). That when given, the fold captures the
+        pre-fold sm_key bytes into a throwaway temp var (N[75]),
+        reassigns sm_key from that temp, and then wipes the temp right
+        after. The password-derived bytes this fold is about to
+        replace will get explicitly zeroed out, rather than just falling out of
+        scope.
     """
     lines = []
     a = lines.append
@@ -151,7 +161,13 @@ def generate_binding_lines(
     a(f"    {vfp_result} = getattr({vfp_hash}, {enc('digest')})()")
     # Fold fingerprint into sm_key via HMAC
     a(f"    {vfp_hmac} = {imp_fn}({enc('hmac')})")
-    a(f"    {sm_key} = getattr({vfp_hmac}, {enc('new')})({vfp_result}, {sm_key}, getattr({vfp_h}, {enc('sha256')})).digest()")
+    if wv_fn:
+        vfp_tmpkey = N[75]  # free slot inside this module's reserved N[60:80] range
+        a(f"    {vfp_tmpkey} = {sm_key}")
+        a(f"    {sm_key} = getattr({vfp_hmac}, {enc('new')})({vfp_result}, {vfp_tmpkey}, getattr({vfp_h}, {enc('sha256')})).digest()")
+        a(f"    {wv_fn}({vfp_tmpkey})")
+    else:
+        a(f"    {sm_key} = getattr({vfp_hmac}, {enc('new')})({vfp_result}, {sm_key}, getattr({vfp_h}, {enc('sha256')})).digest()")
 
     # Cleanup binding locals
     try_del = ', '.join([vfp_hash, vfp_result, vfp_tmp, vfp_hmac])
