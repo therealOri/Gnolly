@@ -18,11 +18,14 @@ Multi-pass AST obfuscation pipeline.
 
 What is and isn't renamed
 --------------------------
-RENAMED:   module-level functions, classes, local variables
+RENAMED:   module-level functions, classes, local variables, function
+           parameters (including, any keyword-argument name
+           at a call site that provably targets that exact parameter.
 NOT RENAMED: method names (accessed via .attr -> can't know the type),
-             function parameters (keyword call compatibility),
+             a call's keyword-argument name (UNLESS it resolves to a
+             locally-defined function's own renamed parameter),
              import names/aliases (obfuscated via __import__ instead),
-             __dunder__ names, builtins
+             __dunder__ names, and builtins
 
 Random policy
 --------------
@@ -111,8 +114,7 @@ class _Collector(ast.NodeVisitor):
         self._pool = pool
         self._in_class = 0        # depth (inside a class body, skip method names)
         self._class_body_depth = 0  # >0 only while directly at class-body statement
-                                     # level (not inside a nested method/function) --
-                                     # see visit_Name for why this matters
+                                     # level (not inside a nested method/function)
         self._func_depth = 0        # depth inside function/method bodies -> used
                                      # together with _in_class to detect "true"
                                      # module top-level
@@ -122,6 +124,26 @@ class _Collector(ast.NodeVisitor):
         # This is required for module_mode (gnolly.package /
         # gnolly.wheel), name mangling them would break the public API of an otherwise-normal importable package.
         # Everything else (locals, nested functions, method internals) is still mangled.
+
+        # function's original name -> set of ITS OWN parameter original
+        # names that are individually renameable. 
+        # Built here and independent of whether the function's own name gets renamed. 
+        # Consumed by _Transformer.visit_Call so that a
+        # call's keyword argument name is renamed when it's tied back to a specific,
+        # locally-defined function's own renamed parameter of that exact name.
+        # never for a call that dives into external code such as stdlib, builtins, etc. (anything not defined in this
+        # source).
+        self.func_params: dict[str, set] = {}
+
+        # ClassName(...) dispatches to that class's __init__, so a keyword
+        # at a class-instantiation call site needs the exact same
+        # treatment as a plain function call and merged into
+        # func_params by resolve_class_init_params() once the whole tree
+        # has been walked, so base-class chains (collected along the way)
+        # are available for classes that don't define their own
+        # __init__/__new__ and inherit one instead.
+        self._class_own_init_params: dict[str, set] = {}
+        self._class_bases: dict[str, list] = {}
 
     def _at_toplevel(self) -> bool:
         return self._func_depth == 0 and self._in_class == 0
@@ -135,6 +157,14 @@ class _Collector(ast.NodeVisitor):
         # preserve_toplevel is on) not a true module-level def either.
         if self._in_class == 0 and not (self._preserve_toplevel and self._at_toplevel()):
             self._reg(node.name)
+
+        # Record this function's own parameter names, regardless of
+        # whether ITS name got renamed above.
+        _params = (node.args.posonlyargs + node.args.args + node.args.kwonlyargs)
+        _names = {p.arg for p in _params if _renameable(p.arg)}
+        if _names:
+            self.func_params.setdefault(node.name, set()).update(_names)
+
         saved = self._class_body_depth
         self._class_body_depth = 0
         self._func_depth += 1
@@ -147,11 +177,49 @@ class _Collector(ast.NodeVisitor):
     def visit_ClassDef(self, node):
         if not (self._preserve_toplevel and self._at_toplevel()):
             self._reg(node.name)
+
+        # Own (not inherited) __init__/__new__, if this class defines
+        # one directly in its body.
+        for _stmt in node.body:
+            if isinstance(_stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and _stmt.name in ('__init__', '__new__'):
+                _params = (_stmt.args.posonlyargs + _stmt.args.args + _stmt.args.kwonlyargs)
+                _names = {p.arg for p in _params if _renameable(p.arg)}
+                if _names:
+                    self._class_own_init_params.setdefault(node.name, set()).update(_names)
+
+        # Base names, Name-only (an Attribute base like "module.Base" is
+        # an external class -> its __init__ isn't ours to know about or
+        # rename, so it's simply not recorded and that branch stops there.
+        self._class_bases[node.name] = [b.id for b in node.bases if isinstance(b, ast.Name)]
+
         self._in_class += 1
         self._class_body_depth += 1
         self.generic_visit(node)
         self._class_body_depth -= 1
         self._in_class -= 1
+
+    def resolve_class_init_params(self) -> None:
+        """
+        Call once after .visit(tree) has walked the whole module. For
+        every class seen, finds the renameable __init__/__new__
+        parameter names that actually apply to "ClassName(...)" (its
+        own, if it defines one, else the first one found walking up its
+        base-class chain) and merges the result into func_params under the class's own name,
+        so _Transformer.visit_Call's lookup (keyed by the call target's
+        name) finds it the same way it finds a plain function.
+        """
+        for _cname in self._class_bases:
+            _seen: set = set()
+            _cur = _cname
+            while _cur is not None and _cur not in _seen:
+                _seen.add(_cur)
+                _own = self._class_own_init_params.get(_cur)
+                if _own:
+                    self.func_params.setdefault(_cname, set()).update(_own)
+                    break
+                _bases = self._class_bases.get(_cur) or []
+                _cur = _bases[0] if _bases else None
 
     def visit_Name(self, node):
         if isinstance(node.ctx, ast.Store):
@@ -753,8 +821,12 @@ class _Transformer(ast.NodeTransformer):
     def __init__(self, pool: _NamePool,
                  obf_strings, obf_constants, obf_imports,
                  inject_dead, flatten_flow,
-                 bogus_hierarchy: bool = True, alias_exprs: bool = True):
+                 bogus_hierarchy: bool = True, alias_exprs: bool = True,
+                 func_params: dict | None = None):
         self._pool         = pool
+        # function original-name -> set of its own renameable parameter
+        # original-names, from _Collector's Pass 1 walk.
+        self._func_params  = func_params or {}
         self._rng          = random.SystemRandom()
         self._obf_str      = obf_strings
         self._obf_const    = obf_constants
@@ -923,11 +995,25 @@ class _Transformer(ast.NodeTransformer):
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
-    # Calls -> expression aliasing (Pass 10). Runs after generic_visit has
-    # already transformed this call's children (func/args/keywords), so
-    # nested calls get wrapped innermost-first, making sure we only wrap a call site once.
+    # Calls -> keyword-argument matching + expression aliasing (Pass 10). 
+    # Keywords are handled directly here, not via a standalone visit_keyword, 
+    # because deciding whether a given keyword's name is safe to rename is a property of the ENCLOSING
+    # call, not of the keyword node in isolation.
     def visit_Call(self, node):
-        self.generic_visit(node)
+        # Capture the call target's ORIGINAL (pre-rename) name before
+        # anything below renames node.func, so it can be looked up in
+        # _func_params, which is keyed by original names from Pass 1.
+        orig_func_name = node.func.id if isinstance(node.func, ast.Name) else None
+        eligible = self._func_params.get(orig_func_name) if orig_func_name else None
+
+        node.func = self.visit(node.func)
+        node.args = [self.visit(a) for a in node.args]
+        for kw in node.keywords:
+            if kw.arg is not None and eligible is not None \
+                    and kw.arg in eligible and _renameable(kw.arg):
+                kw.arg = self._pool.get(kw.arg)
+            kw.value = self.visit(kw.value)
+
         if self._alias and self._rng.random() < self._ALIAS_CALL_P:
             return self._alias_wrap(node)
         return node
@@ -940,17 +1026,6 @@ class _Transformer(ast.NodeTransformer):
     def visit_arg(self, node):
         if _renameable(node.arg):
             node.arg = self._pool.get(node.arg)
-        return node
-
-    def visit_keyword(self, node):
-        # Companion to the visit_arg above: if f's parameter "p" got
-        # renamed (because "p" collided with some unrelated name
-        # elsewhere), a call like "f(p=1)" needs its keyword name renamed
-        # the exact same way, or the call breaks with an unexpected-
-        # keyword-argument error.
-        if node.arg is not None and _renameable(node.arg):
-            node.arg = self._pool.get(node.arg)
-        node.value = self.visit(node.value)
         return node
 
     def visit_Attribute(self, node):
@@ -1061,12 +1136,15 @@ def obfuscate_source(
     tree = ast.parse(source)
 
     pool = _NamePool()
-    _Collector(pool, preserve_toplevel=preserve_toplevel).visit(tree)
+    collector = _Collector(pool, preserve_toplevel=preserve_toplevel)
+    collector.visit(tree)
+    collector.resolve_class_init_params()
 
     xfm = _Transformer(pool,
                         obf_strings, obf_constants, obf_imports,
                         inject_dead, flatten_flow,
-                        bogus_hierarchy=bogus_hierarchy, alias_exprs=alias_exprs)
+                        bogus_hierarchy=bogus_hierarchy, alias_exprs=alias_exprs,
+                        func_params=collector.func_params)
     new_tree = xfm.visit(tree)
     ast.fix_missing_locations(new_tree)
     return ast.unparse(new_tree)
