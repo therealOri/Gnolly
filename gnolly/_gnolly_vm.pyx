@@ -1,6 +1,8 @@
 # cython: language_level=3
-# cython: boundscheck=False
+# cython: boundscheck=True
 # cython: wraparound=True
+
+
 """
 gnolly/_gnolly_vm.pyx  -> Gnolly Instruction Set (GIR) interpreter
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -29,12 +31,14 @@ import operator as _op
 import struct as _struct
 import types as _types_mod
 import collections.abc as _abc_mod
+import os as _os_mod
+import hashlib as _hashlib_mod
+import secrets as _secrets_mod
 
 # GIR_TABLE_SIZE must match gnolly.vm_isa.GIR_TABLE_SIZE exactly.
 # (protect-time and runtime must agree on the reverse-table size).
 cdef int GIR_TABLE_SIZE = 65536
 cdef int GIR_FORMAT_VERSION = 1
-
 
 # ---------------------------------------------------------------------------
 # Sentinels
@@ -154,6 +158,109 @@ cdef class GIRCodeObj:
     cdef public list instructions     # list of (op, arg) tuples, op already unshuffled
     cdef public list exc_table        # list of (start, end, target, depth, lasti)
     cdef public list line_map
+    cdef bytes _ichk                  # continuous-integrity baseline digest, see _code_digest()
+
+
+
+# ---------------------------------------------------------------------------
+# Continuous integrity re-verification
+# ---------------------------------------------------------------------------
+#
+# The design here mirrors gnolly.poison's detection/reaction split and is adapted to this
+# layer: by the time code is executing inside run_frame(), AES-GCM
+# decryption has already happened and there's no key material left to
+# fold a failure into.
+# So the reaction here is a direct, silent os._exit(1) at the check site
+# -> which means there is no try/except Exception (or even bare except:) in the PROTECTED program
+# itself that can be intercepted, logged, or way to swallow a detected tamper the way it
+# could if this were a normal raised exception routed through the exc_table.
+#
+# _CHECK_PERIOD is chosen once per process start (not a fixed build-time
+# constant) so the exact cadence isn't the same across every run.
+cdef unsigned long long _CHECK_PERIOD = <unsigned long long> _secrets_mod.choice(
+    (2048, 3072, 4096, 6144, 8192)
+)
+cdef unsigned long long _tick_counter = 0
+
+
+cdef bytes _code_digest(GIRCodeObj code):
+    """
+    Snapshot digest over everything the dispatch loop actually reads for
+    this code object: the decoded (op, arg) instruction stream (post
+    opcode-table-unshuffle) plus its scalar constants. Nested GIRCodeObj
+    consts fold in their OWN already-computed digest rather than being
+    walked again here.
+
+    Called exactly twice per code object under normal operation: once at
+    decode time (the trusted baseline, via _read_code) and then
+    repeatedly from inside the dispatch loop (_tick_and_maybe_check)
+    while it runs. Same function both times, on purpose -> what gets
+    checked at load and what gets checked at runtime can never drift
+    apart from each other.
+    """
+    cdef list instructions = code.instructions
+    cdef list consts = code.consts
+    cdef Py_ssize_t i, n = len(instructions), m = len(consts)
+    cdef int op
+    cdef long long arg
+    cdef bytearray buf = bytearray(n * 10)
+    cdef Py_ssize_t off = 0
+    cdef tuple item
+    for i in range(n):
+        item = instructions[i]
+        op = item[0]
+        arg = item[1]
+        buf[off]     = (op >> 8) & 0xFF
+        buf[off + 1] = op & 0xFF
+        buf[off + 2] = (arg >> 56) & 0xFF
+        buf[off + 3] = (arg >> 48) & 0xFF
+        buf[off + 4] = (arg >> 40) & 0xFF
+        buf[off + 5] = (arg >> 32) & 0xFF
+        buf[off + 6] = (arg >> 24) & 0xFF
+        buf[off + 7] = (arg >> 16) & 0xFF
+        buf[off + 8] = (arg >> 8) & 0xFF
+        buf[off + 9] = arg & 0xFF
+        off += 10
+
+    h = _hashlib_mod.blake2b(bytes(buf), digest_size=16)
+    cdef object cv
+    for i in range(m):
+        cv = consts[i]
+        if isinstance(cv, GIRCodeObj):
+            if (<GIRCodeObj> cv)._ichk is not None:
+                h.update((<GIRCodeObj> cv)._ichk)
+        elif isinstance(cv, str):
+            h.update(cv.encode("utf-8", "surrogateescape"))
+        elif isinstance(cv, (bytes, bytearray)):
+            h.update(bytes(cv))
+        elif isinstance(cv, (int, float, complex, bool, tuple, frozenset)):
+            h.update(repr(cv).encode("utf-8", "surrogateescape"))
+        # None / Ellipsis / other singletons: position in consts is
+        # already implied by the instructions that reference this index.
+    return h.digest()
+
+
+cdef inline void _tick_and_maybe_check(GIRCodeObj code):
+    """
+    Called once per executed instruction, from inside the hot dispatch
+    loop. This re-hashing of the code object on the 1-in-N
+    iterations where the counter lands on the period.
+
+    A global counter rather than per-frame, it will keep
+    accumulating across calls/recursion/generator resumes. So a
+    function that's individually too short to ever hit the threshold on
+    its own still gets checked once the process's cumulative instruction
+    count crosses it.
+    """
+    global _tick_counter
+    _tick_counter += 1
+    if (_tick_counter % _CHECK_PERIOD) != 0:
+        return
+    if code._ichk is None:
+        return
+    if _code_digest(code) != code._ichk:
+        _os_mod._exit(1)
+
 
 
 def _read_const(_Reader r, dict table):
@@ -257,6 +364,12 @@ def _read_code(_Reader r, dict table):
         line_map.append((<long long>idx, prev_line))
     code.line_map = line_map
 
+    # Baseline snapshot, taken the instant this code object is fully
+    # decoded -> the earliest point its post-table-unshuffle
+    # opcodes exist in memory at all. If any divergence from this snapshot is found
+    # later in _tick_and_maybe_check() means something done to this
+    # object's instructions/consts that wasn't us after the fact.
+    code._ichk = _code_digest(code)
     return code
 
 
@@ -768,6 +881,8 @@ def run_frame(GIRCodeObj code, list fastlocals, list cells, dict globs, dict bui
         op = instructions[ip][0]
         arg = instructions[ip][1]
         ip += 1
+
+        _tick_and_maybe_check(code)
 
         try:
             if op == OP_NOP or op == OP_RESUME:
@@ -1846,6 +1961,9 @@ def run_gen_frame(
         op = instructions[ip][0]
         arg = instructions[ip][1]
         ip += 1
+
+        _tick_and_maybe_check(code)
+
         try:
             # ── Generator-specific opcodes ─────────────────────────────────
             if op == OP_RETURN_GENERATOR:
