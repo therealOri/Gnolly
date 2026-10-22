@@ -33,6 +33,11 @@ from .ptrace_guard import (
 from .binding_stub import generate_binding_lines
 from .memwipe_stub import generate_wipe_setup_lines, wipe_call
 from .import_hook  import generate_import_hook_lines, get_core_so_hash, get_vm_so_hash
+from .heartbeat import (
+    generate_python_heartbeat_lines,
+    DEFAULT_MIN_DELAY as HEARTBEAT_DEFAULT_MIN_DELAY,
+    DEFAULT_MAX_DELAY as HEARTBEAT_DEFAULT_MAX_DELAY,
+)
 from .namegen import random_confusable_name
 from .flatten import flatten_source
 from .selfhash import wrap_with_self_hash
@@ -138,6 +143,9 @@ def generate_stub(
     ptrace_guard_heartbeat: bool = True,
     ptrace_guard_heartbeat_min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
     ptrace_guard_heartbeat_max_delay: float = DEFAULT_HEARTBEAT_MAX_DELAY,
+    python_heartbeat: bool = True,
+    python_heartbeat_min_delay: float = HEARTBEAT_DEFAULT_MIN_DELAY,
+    python_heartbeat_max_delay: float = HEARTBEAT_DEFAULT_MAX_DELAY,
 ) -> str:
     """
     module_mode : when True, the generated stub executes the protected
@@ -178,9 +186,23 @@ def generate_stub(
         two constants directly to change the project-wide default;
         these aren't exposed as CLI flags).
         No effect when ptrace_guard_heartbeat is False.
+    python_heartbeat : when True (default), a daemon thread (see
+        gnolly.heartbeat) re-verifies the stub's own self-hash, both
+        compiled .so's on-disk hashes, and antidebug signals on a
+        randomized interval for the life of the process -> the
+        Python-layer companion to the GIR VM's own continuous check
+        (gnolly/_gnolly_vm.pyx's _tick_and_maybe_check), which only
+        covers code running through the VM. A detected mismatch calls
+        os._exit(1) directly from the thread.
+    python_heartbeat_min_delay, python_heartbeat_max_delay :
+        randomized re-check interval in seconds (default
+        gnolly.heartbeat.DEFAULT_MIN_DELAY/MAX_DELAY, 0.4-1.0s -> this
+        probe does real disk I/O re-reading both .so's, so it's much
+        coarser than ptrace_guard_heartbeat's C-level 0.5-2ms). No
+        effect when python_heartbeat is False.
     """
     rng = random.SystemRandom()
-    N   = _gen_names(190)
+    N   = _gen_names(220)
 
     # String encoding key (different from payload xor_key)
     str_key  = _make_str_key()
@@ -459,7 +481,7 @@ def generate_stub(
     _vm_so_hash = get_vm_so_hash()
 
     if _so_hash and _vm_so_hash:
-        _hook_lines, _core_hash_var = generate_import_hook_lines(
+        _hook_lines, _core_hash_var, _core_so_path_var = generate_import_hook_lines(
             s_fn=s_fn, b_fn=b_fn,
             str_key=str_key, byt_key=byt_key,
             obn=obn, N=N, cr_var=cr_var,
@@ -496,7 +518,7 @@ def generate_stub(
         _vm_loader_var = N[149]
         a(f"{_vm_loader_var} = getattr({N[89]}, {s_fn}({_enc_str('_gnolly_load_vm_module', str_key)}))")
 
-        _vm_hook_lines, _vm_hash_var = generate_import_hook_lines(
+        _vm_hook_lines, _vm_hash_var, _vm_so_path_var = generate_import_hook_lines(
             s_fn=s_fn, b_fn=b_fn,
             str_key=str_key, byt_key=byt_key,
             obn=obn, N=N, cr_var=cr_var,
@@ -539,6 +561,23 @@ def generate_stub(
                     poison_var, sm_key, h_hash, _hmac_var,
                     s_fn, b_fn, str_key, byt_key, obn, wv_fn=wv_fn):
                 a(_pfl)
+            a("")
+
+        # ── PYTHON-LAYER CONTINUOUS HEARTBEAT (see gnolly.heartbeat) ─────────
+        # Starts a daemon thread BEFORE cr_var() below, since that call
+        # blocks until the protected program's own code has finished
+        # running -> the main thread is unavailable for anything else for
+        # the rest of the process's life past this point.
+        if python_heartbeat:
+            for _hbl in generate_python_heartbeat_lines(
+                    s_fn=s_fn, h_sys=h_sys, h_os=h_os, str_key=str_key,
+                    obn=obn, N=N, src_var=N[150],
+                    so_path_vars=[_core_so_path_var, _vm_so_path_var],
+                    name_offset=190, imp_fn=imp_fn, h_blt=h_blt,
+                    min_delay=python_heartbeat_min_delay,
+                    max_delay=python_heartbeat_max_delay,
+                    check_self_hash=self_hash):
+                a(_hbl)
             a("")
 
         # Both .so files verified, loaded, and the VM registered into core.
