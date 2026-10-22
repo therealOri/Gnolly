@@ -45,6 +45,10 @@ from .binding     import bind_salt, collect_fingerprint, fingerprint_from_hex
 from .integrity   import collect_runtime_hashes, fold_integrity
 from .poison      import fold_poison
 from .ptrace_guard import DEFAULT_HEARTBEAT_MIN_DELAY, DEFAULT_HEARTBEAT_MAX_DELAY
+from .heartbeat import (
+    DEFAULT_MIN_DELAY as HEARTBEAT_DEFAULT_MIN_DELAY,
+    DEFAULT_MAX_DELAY as HEARTBEAT_DEFAULT_MAX_DELAY,
+)
 from .vm_pipeline import protect_with_vm
 from .vm_translate import VMUnsupportedError
 
@@ -85,6 +89,9 @@ def protect(
     ptrace_guard_heartbeat: bool = True,
     ptrace_guard_heartbeat_min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
     ptrace_guard_heartbeat_max_delay: float = DEFAULT_HEARTBEAT_MAX_DELAY,
+    python_heartbeat: bool = True,
+    python_heartbeat_min_delay: float = HEARTBEAT_DEFAULT_MIN_DELAY,
+    python_heartbeat_max_delay: float = HEARTBEAT_DEFAULT_MAX_DELAY,
 ) -> str:
     """
     Parameters
@@ -178,6 +185,22 @@ def protect(
                       after detaching it, not how long they can inspect
                       memory while it's stopped. No effect when
                       ptrace_guard_heartbeat is False.
+    python_heartbeat : when True (default), a daemon thread
+                      (gnolly.heartbeat) re-verifies the stub's own
+                      self-hash, both compiled .so's on-disk hashes, and
+                      antidebug signals on a randomized interval for the
+                      life of the process -> the Python-layer companion
+                      to the GIR VM's own continuous check
+                      (gnolly/_gnolly_vm.pyx), which only covers code
+                      running through the VM. A detected mismatch calls
+                      os._exit(1) directly.
+    python_heartbeat_min_delay, python_heartbeat_max_delay :
+                      randomized re-check interval in seconds (default
+                      gnolly.heartbeat.DEFAULT_MIN_DELAY/MAX_DELAY,
+                      0.4-1.0s -> coarser than ptrace_guard_heartbeat's
+                      0.5-2ms since this does real disk I/O re-reading
+                      both .so's each pass). No effect when
+                      python_heartbeat is False.
     """
     def _log(msg: str) -> None:
         if verbose:
@@ -282,6 +305,9 @@ def protect(
         ptrace_guard_heartbeat = ptrace_guard_heartbeat,
         ptrace_guard_heartbeat_min_delay = ptrace_guard_heartbeat_min_delay,
         ptrace_guard_heartbeat_max_delay = ptrace_guard_heartbeat_max_delay,
+        python_heartbeat = python_heartbeat,
+        python_heartbeat_min_delay = python_heartbeat_min_delay,
+        python_heartbeat_max_delay = python_heartbeat_max_delay,
     )
     if minify:
         _log("Minifying stub …")
