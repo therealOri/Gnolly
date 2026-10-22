@@ -13,7 +13,7 @@ Search order for _gnolly_core.so
 ---------------------------------
 1. Alongside this module's own __file__      (falls back to argv[0] if
                                                __file__ isn't set, e.g. -c).
-                                               
+
 2. A bundled _gnolly_runtime/ dir next to this module's __file__, or one
    level up (package root)                    (optional: only present when
                                                a wheel was built with
@@ -85,13 +85,19 @@ def generate_import_hook_lines(
 
     Returns
     -------
-    (lines, hash_var) -> hash_var is the name of the local variable holding
-    the loaded .so's *raw* SHA-256 digest (bytes, not hex). The caller
-    (stub.py) folds this into the decryption key alongside the other .so's
-    hash -> that fold is the actual integrity enforcement; a tampered .so
-    changes hash_var, which changes the derived key, which makes AES-GCM
-    reject the ciphertext regardless of whether the cosmetic check above
-    was patched out.
+    (lines, hash_var, path_var) -> hash_var is the name of the local
+    variable holding the loaded .so's *raw* SHA-256 digest (bytes, not
+    hex). The caller (stub.py) folds this into the decryption key
+    alongside the other .so's hash -> that fold is the actual integrity
+    enforcement; a tampered .so changes hash_var, which changes the
+    derived key, which makes AES-GCM reject the ciphertext regardless of
+    whether the cosmetic check above was patched out.
+    path_var is the name of the local variable holding the resolved
+    pathlib.Path this .so was actually loaded from (whichever of the
+    search locations above found it) -> gnolly.heartbeat reuses this
+    directly so its periodic re-check reads from the exact same file,
+    rather than re-running its own independent (and possibly
+    location-mismatched) search.
     """
     lines = []
     a = lines.append
@@ -243,7 +249,7 @@ def generate_import_hook_lines(
     a(f"except Exception:")
     a(f"    getattr({h_sys}, {s_fn}({exit_enc}))(1)")
 
-    return lines, v_hash_rw
+    return lines, v_hash_rw, v_so
 
 
 def get_vm_so_hash() -> str | None:
