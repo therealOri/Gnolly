@@ -139,7 +139,7 @@ def generate_stub(
     module_mode: bool = False,
     decorrelate_checks: bool = True,
     poison_watchdog: bool = False,
-    ptrace_guard: bool = False,
+    ptrace_guard: bool = True,
     ptrace_guard_heartbeat: bool = True,
     ptrace_guard_heartbeat_min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
     ptrace_guard_heartbeat_max_delay: float = DEFAULT_HEARTBEAT_MAX_DELAY,
