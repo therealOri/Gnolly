@@ -84,7 +84,7 @@ def protect(
     alias_exprs: bool = True,
     decorrelate_checks: bool = True,
     poison_watchdog: bool = False,
-    ptrace_guard: bool = False,
+    ptrace_guard: bool = True,
     ptrace_guard_strict: bool = True,
     ptrace_guard_heartbeat: bool = True,
     ptrace_guard_heartbeat_min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
