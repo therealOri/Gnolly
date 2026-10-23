@@ -138,7 +138,7 @@ def generate_stub(
     will_be_packed: bool = False,
     module_mode: bool = False,
     decorrelate_checks: bool = True,
-    poison_watchdog: bool = False,
+    poison_watchdog: bool = True,
     ptrace_guard: bool = True,
     ptrace_guard_heartbeat: bool = True,
     ptrace_guard_heartbeat_min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
@@ -169,6 +169,10 @@ def generate_stub(
         gnolly.poison.generate_poison_watch_lines). Off by default
         since it is a more aggressive default than the key
         fold alone. Has no effect when decorrelate_checks is False.
+        When python_heartbeat is ALSO on (the default), this check is
+        folded directly into that thread's already-repeating loop
+        instead of spawning gnolly.poison.generate_poison_watch_lines'
+        own separate, single-purpose thread.
     ptrace_guard : Linux-only. When True, the stub self-attaches via
         ptrace(PTRACE_TRACEME,...) immediately after it loads and
         SHA-256-verifies gnolly/_gnolly_core.so
@@ -304,7 +308,7 @@ def generate_stub(
         _pinit_lines, poison_var = generate_poison_init_lines(s_fn, str_key, obn, _p_rng, set(N))
         for _pl in _pinit_lines:
             a(_pl)
-        if poison_watchdog:
+        if poison_watchdog and not python_heartbeat:
             for _pwl in generate_poison_watch_lines(
                     poison_var, s_fn, h_os, str_key, obn, imp_fn=imp_fn):
                 a(_pwl)
@@ -569,6 +573,7 @@ def generate_stub(
         # running -> the main thread is unavailable for anything else for
         # the rest of the process's life past this point.
         if python_heartbeat:
+            _hb_poison_var = poison_var if poison_watchdog else None
             for _hbl in generate_python_heartbeat_lines(
                     s_fn=s_fn, h_sys=h_sys, h_os=h_os, str_key=str_key,
                     obn=obn, N=N, src_var=N[150],
@@ -576,6 +581,7 @@ def generate_stub(
                     name_offset=190, imp_fn=imp_fn, h_blt=h_blt,
                     min_delay=python_heartbeat_min_delay,
                     max_delay=python_heartbeat_max_delay,
+                    poison_var=_hb_poison_var,
                     check_self_hash=self_hash):
                 a(_hbl)
             a("")
