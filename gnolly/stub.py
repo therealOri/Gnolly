@@ -162,13 +162,12 @@ def generate_stub(
         exit() call anywhere near the check that found it. Set False
         to get the old immediate-exit-at-detection-site behavior back
         (useful while developing/debugging a protected build).
-    poison_watchdog : when True, additionally starts a daemon thread
-        that hard-kills the process (os._exit) after a randomized
-        delay if the poison accumulator is nonzero -> an independent,
-        out-of-band backup reaction on top of the key fold above (see
-        gnolly.poison.generate_poison_watch_lines). Off by default
-        since it is a more aggressive default than the key
-        fold alone. Has no effect when decorrelate_checks is False.
+    poison_watchdog : default True. An independent, out-of-band backup
+        reaction on top of the key fold above: hard-kills the process
+        (os._exit) if the poison accumulator is ever nonzero,
+        specifically to still catch a tamper attempt that successfully
+        defeats the key-fold step itself. Has no effect when
+        decorrelate_checks is False (nothing to watch).
         When python_heartbeat is ALSO on (the default), this check is
         folded directly into that thread's already-repeating loop
         instead of spawning gnolly.poison.generate_poison_watch_lines'
