@@ -57,6 +57,7 @@ watched files (permissions, an antivirus lock, or a rebuild landing mid-run, etc
 from __future__ import annotations
 from .strcodec import _enc_str
 from .antidebug import _DEBUG_MODULES
+from .poison import _POISON_MASK
 
 DEFAULT_MIN_DELAY = 0.4
 DEFAULT_MAX_DELAY = 1.0
@@ -80,6 +81,7 @@ def generate_python_heartbeat_lines(
     min_delay: float = DEFAULT_MIN_DELAY,
     max_delay: float = DEFAULT_MAX_DELAY,
     check_self_hash: bool = True,
+    poison_var: str | None = None,
 ) -> list[str]:
     """
     Return stub source lines that capture integrity baselines for the
@@ -171,6 +173,11 @@ def generate_python_heartbeat_lines(
     _mod_list = ", ".join(s(mod) for mod in _DEBUG_MODULES)
     a(f"            if any({v_mod_iter} in {v_mods} for {v_mod_iter} in [{_mod_list}]):")
     a(f"                {em(h_os, '_exit', obn(1))}")
+
+    # 4. gnolly.poison's accumulator, folded into this same loop.
+    if poison_var is not None:
+        a(f"            if {poison_var} & {obn(_POISON_MASK)}:")
+        a(f"                {em(h_os, '_exit', obn(1))}")
 
     # Fail-closed: anything going wrong inside the probe itself is treated the same as
     # a detected mismatch rather than being silently skipped.
