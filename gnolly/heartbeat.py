@@ -81,7 +81,7 @@ def generate_python_heartbeat_lines(
     min_delay: float = DEFAULT_MIN_DELAY,
     max_delay: float = DEFAULT_MAX_DELAY,
     check_self_hash: bool = True,
-    poison_var: str | None = None,
+    poison_var: str | None = None
 ) -> list[str]:
     """
     Return stub source lines that capture integrity baselines for the
