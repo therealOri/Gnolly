@@ -83,7 +83,7 @@ def protect(
     bogus_hierarchy: bool = True,
     alias_exprs: bool = True,
     decorrelate_checks: bool = True,
-    poison_watchdog: bool = False,
+    poison_watchdog: bool = True,
     ptrace_guard: bool = True,
     ptrace_guard_strict: bool = True,
     ptrace_guard_heartbeat: bool = True,
