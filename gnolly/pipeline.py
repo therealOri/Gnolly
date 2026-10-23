@@ -153,11 +153,16 @@ def protect(
                       folded into the decryption key hundreds of lines
                       later instead. Disable to get the old
                       immediate-exit-at-detection-site behavior back.
-    poison_watchdog : toggles an additional daemon-thread backup
-                      reaction (random-delay hard process kill if the
-                      poison accumulator is nonzero), independent of
-                      the key fold above. Off by default; only has an
-                      effect when decorrelate_checks is True.
+    poison_watchdog : default True. An independent backup reaction
+                      (hard process kill if the poison accumulator is
+                      nonzero), on top of the key fold above -> catches
+                      a tamper attempt that would defeat the key fold
+                      itself. Only has an effect when decorrelate_checks
+                      is True. When python_heartbeat is ALSO on (the
+                      default), this is folded into that thread's
+                      repeating loop as one more indistinguishable
+                      branch, rather than a second single-purpose
+                      thread.
     ptrace_guard    : Linux-only. When True, the protected stub
                       self-attaches via ptrace(PTRACE_TRACEME,...)
                       immediately after it loads and SHA-256-verifies
