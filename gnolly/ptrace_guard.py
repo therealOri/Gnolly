@@ -28,7 +28,7 @@ Why the mechanism itself is in the .so and not here
     ptrace() that always reports success doesn't intercept it.
 
 
-Containers/seccomp ambiguity (see strict= below)
+Containers/seccomp ambiguity
 --------------------------------------------------
 Containers and sandboxes commonly block the ptrace syscall via seccomp
 (Docker's default profile does, unless --cap-add=SYS_PTRACE or an
@@ -77,7 +77,7 @@ def generate_ptrace_guard_call_lines(
 
     A self-attach failure is always treated like every other
     antidebug.py check (poison-mark if decorrelated, else an immediate
-    exit) -> unconditional, not configurable.
+    exit).
 
     heartbeat : when True (default), and the initial self-attach
         succeeds, the .so starts its own detached pthread that
