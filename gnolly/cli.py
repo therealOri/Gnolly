@@ -87,8 +87,8 @@ def cmd_protect(args):
         bogus_hierarchy     = not args.no_hierarchy,
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
-        poison_watchdog     = args.poison_watchdog,
-        ptrace_guard           = args.ptrace_guard,
+        poison_watchdog     = not args.no_poison_watchdog,
+        ptrace_guard           = not args.no_ptrace_guard,
         ptrace_guard_heartbeat = args.ptrace_guard_heartbeat,
     )
     print(f"\n[gnolly] Done -> {out}")
@@ -138,8 +138,8 @@ def cmd_protect_dir(args):
         bogus_hierarchy     = not args.no_hierarchy,
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
-        poison_watchdog     = args.poison_watchdog,
-        ptrace_guard           = args.ptrace_guard,
+        poison_watchdog     = not args.no_poison_watchdog,
+        ptrace_guard           = not args.no_ptrace_guard,
         ptrace_guard_heartbeat = args.ptrace_guard_heartbeat,
     )
     print(f"\n[gnolly] Runtime:")
@@ -196,8 +196,8 @@ def cmd_protect_wheel(args):
         bogus_hierarchy     = not args.no_hierarchy,
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
-        poison_watchdog     = args.poison_watchdog,
-        ptrace_guard           = args.ptrace_guard,
+        poison_watchdog     = not args.no_poison_watchdog,
+        ptrace_guard           = not args.no_ptrace_guard,
         ptrace_guard_heartbeat = args.ptrace_guard_heartbeat,
     )
     print(f"\n[gnolly] Wheel:   {wheel_path}")
@@ -235,25 +235,26 @@ def _add_obf_flags(p):
                         "cosmetic checks exit() immediately at the detection site instead of "
                         "folding into the decryption key later; on by default -> see "
                         "gnolly.poison, useful mainly while debugging a protected build)")
-    p.add_argument("--poison-watchdog", action="store_true", dest="poison_watchdog",
-                   help="Add a daemon-thread backup reaction: hard-kill the process after a "
-                        "randomized delay if any check ever flagged something. Off by default; "
-                        "has no effect with --no-decorrelate")
-    p.add_argument("--ptrace", action="store_true", dest="ptrace_guard",
-                   help="Linux-only: self-attach via ptrace(PTRACE_TRACEME,...) immediately "
-                        "after the stub loads and hash-verifies _gnolly_core.so, so no debugger "
-                        "(gdb, strace, etc.) can attach at all, since the OS allows only one "
-                        "tracer per process. Implemented as compiled C inside the .so, not "
-                        "Python, and includes a sub-millisecond re-verification heartbeat by "
-                        "default (see --ptrace-no-heartbeat). Always fails the run if "
-                        "self-attach can't be established (poison-mark if decorrelation is on, "
-                        "else immediate exit) -> this is unconditional, since a tolerated "
-                        "failure can't be told apart from an attacker already holding live "
-                        "ptrace access. A deployment target that denies ptrace via policy (e.g. "
-                        "a container without CAP_SYS_PTRACE) should simply not use this flag "
-                        "there. No-ops on other platforms and wherever the syscall can't be "
-                        "reached. Off by default -> see gnolly.ptrace_guard for caveats "
-                        "(root, the startup race window)")
+    p.add_argument("--no-poison-watchdog", action="store_true", dest="no_poison_watchdog",
+                   help="Disable the daemon-thread backup reaction that hard-kills the process "
+                        "if any check ever flagged something (folded into the Python heartbeat's "
+                        "loop when that's also on). On by default; has no effect with "
+                        "--no-decorrelate")
+    p.add_argument("--no-ptrace", action="store_true", dest="no_ptrace_guard",
+                   help="Linux-only: disable the ptrace(PTRACE_TRACEME,...) self-attach guard "
+                        "that otherwise blocks any debugger (gdb, strace, etc.) from attaching "
+                        "to the process at all, since the OS allows only one tracer per process. "
+                        "Implemented as compiled C inside the .so, not Python, and includes a "
+                        "sub-millisecond re-verification heartbeat by default (see "
+                        "--ptrace-no-heartbeat). Always fails the run if self-attach can't be "
+                        "established (poison-mark if decorrelation is on, else immediate exit) "
+                        "-> this is unconditional, since a tolerated failure can't be told apart "
+                        "from an attacker already holding live ptrace access; there is no "
+                        "lenient mode. A deployment target that denies ptrace via policy (e.g. a "
+                        "container without CAP_SYS_PTRACE) should use this flag to disable it "
+                        "there outright. On by default elsewhere; no-ops safely on non-Linux "
+                        "platforms either way -> see gnolly.ptrace_guard for caveats (root, the "
+                        "startup race window)")
     p.add_argument("--ptrace-no-heartbeat", action="store_false", dest="ptrace_guard_heartbeat",
                    default=True,
                    help="Disable the heartbeat that periodically re-verifies the self-attach "
