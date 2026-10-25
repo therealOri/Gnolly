@@ -174,7 +174,11 @@ def generate_stub(
         own separate, single-purpose thread.
     ptrace_guard : Linux-only. When True, the stub self-attaches via
         ptrace(PTRACE_TRACEME,...) immediately after it loads and
-        SHA-256-verifies gnolly/_gnolly_core.so
+        SHA-256-verifies gnolly/_gnolly_core.so. A self-attach failure
+        will react like every other antidebug.py check (poison-mark
+        if decorrelate_checks, else immediate exit).
+        A deployment target that can't guarantee CAP_SYS_PTRACE should
+        set this to False rather than expect a lenient/strict mode.
     ptrace_guard_heartbeat : when True (default, and ptrace_guard
         succeeded at runtime), the .so starts a detached pthread that periodically
         re-reads /proc/<pid>/status's TracerPid for the thread that originally self-attached;
