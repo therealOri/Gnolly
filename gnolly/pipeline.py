@@ -85,7 +85,6 @@ def protect(
     decorrelate_checks: bool = True,
     poison_watchdog: bool = True,
     ptrace_guard: bool = True,
-    ptrace_guard_strict: bool = True,
     ptrace_guard_heartbeat: bool = True,
     ptrace_guard_heartbeat_min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
     ptrace_guard_heartbeat_max_delay: float = DEFAULT_HEARTBEAT_MAX_DELAY,
@@ -169,11 +168,11 @@ def protect(
                       gnolly/_gnolly_core.so, which blocks any debugger
                       (gdb, strace, etc.) from attaching to the process
                       at all, since the OS only permits one tracer per
-                      process.
-    ptrace_guard_strict : when True (default), a ptrace_guard failure
-                      always reacts like every other antidebug check
-                      (poison-mark if decorrelate_checks, else
-                      immediate exit). No effect when ptrace_guard is False.
+                      process. A self-attach failure always reacts like
+                      every other antidebug check (poison-mark if
+                      decorrelate_checks, else immediate exit).
+                      A deployment target that can't guarantee CAP_SYS_PTRACE should
+                      set this to False rather than expect a lenient mode.
     ptrace_guard_heartbeat : when True (default), a detached pthread in
                       the core .so periodically
                       re-reads /proc/<pid>/status's TracerPid and
