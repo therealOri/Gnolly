@@ -50,7 +50,7 @@ from argon2.low_level import hash_secret_raw as _argon2_hash_secret_raw, Type as
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-cdef bytes _MAGIC_AAD  = b'GNLY\x02\x00'
+cdef bytes _MAGIC_AAD  = b'GNLY\x01\x00'
 cdef int   _HEADER_LEN = 6 + 32 + 12 + 16   # magic+ver + salt + iv + tag
 
 # Must mirror gnolly/crypto.py's Argon2id parameters exactly -> any drift
