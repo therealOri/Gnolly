@@ -486,7 +486,7 @@ Python-source obfuscation -> everything currently in `flatten.py`, `selfhash.py`
 | ✅ | Argon2id key derivation | `.so` / crypto | Low-Med | Medium |
 | ⏳ | Extra python trigger primitives (`weakref`, `atexit`, `__del__`, frame inspection) | Python | Low | Medium |
 | ✅ | Continuous (not just startup) integrity checks | Python + `.so` | Medium | High |
-| ⏳ | Cross-checking checks | Python | Medium | Medium-High |
+| ✅ | Cross-checking checks | Python | Medium | Medium-High |
 | ✅ | Explicit buffer wiping after decrypt | `.so` | Medium | High |
 | ⏳ | aeskeyfind-class mitigation | `.so` | High | High |
 | ⏳ | Decoy-blob payload scattering ("lattice") | Python / stub layout | High | Medium |
