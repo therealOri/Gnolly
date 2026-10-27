@@ -345,7 +345,6 @@ protect(
     decorrelate_checks: bool = True,
     poison_watchdog: bool = False,
     ptrace_guard: bool = False,
-    ptrace_guard_strict: bool = True,
     ptrace_guard_heartbeat: bool = True,
     ptrace_guard_heartbeat_min_delay: float = 0.0005,
     ptrace_guard_heartbeat_max_delay: float = 0.002,
