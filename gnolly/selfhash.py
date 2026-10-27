@@ -89,6 +89,188 @@ def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]
     return lines
 
 
+
+# ---------------------------------------------------------------------------
+# Cross-checking ("ring") self-hash checks
+# ---------------------------------------------------------------------------
+# The blocks above (_one_check_block) are independent: every one of
+# them hashes the SAME thing (the whole pre_sub body) against the SAME
+# expected digest. And that means an attacker only has to find and patch ONE
+# of them -> whichever copy they happen to hit first -> since the other
+# copies don't know or care that a sibling exists.
+#
+# With a ring check, block i doesn't hash the whole body and
+# doesn't know its own expected digest is shared with anyone; instead it
+# hashes the EXACT source region belonging to block (i+1) % n_checks and
+# compares that against a digest computed from that region alone. And then the
+# last block wraps back around to block 0. Disabling block i changes the
+# bytes block (i-1) is watching, so block (i-1) now trips -> and patching
+# block (i-1) too just pushes the mismatch one block further back around
+# the ring. An attacker has to find every block AND patch all of them
+# (plus every neighbor's recorded expectation of its target) in one
+# atomic edit.
+
+_RING_DIGEST_WIDTH = 64
+_RING_OFFSET_WIDTH = 10  # decimal digits -> room for ~10 GB of source
+
+
+def _fixed_digits(n: int, width: int = _RING_OFFSET_WIDTH) -> str:
+    s = str(n)
+    if len(s) > width:
+        raise ValueError("ring offset too large for its fixed-width slot")
+    return s.zfill(width)
+
+
+def _ring_field(name: str, width: int) -> tuple[str, int]:
+    """
+    name = '<width zero chars>', plus the offset of that zero run
+    within the returned line. Deliberately plain/unobfuscated text (no
+    string-hiding here) -> later passes locate and positionally
+    overwrite this exact span, so it has to stay byte-for-byte
+    predictable rather than going through an expression that might
+    render differently next time it's touched.
+    """
+    prefix = f"{name} = '"
+    return prefix + ("0" * width) + "'", len(prefix)
+
+
+def _positional_patch(text: str, offset: int, new_value: str) -> str:
+    return text[:offset] + new_value + text[offset + len(new_value):]
+
+
+def _one_ring_block(src_var: str, style: int, reserved_names: set) -> dict:
+    """
+    One ring-check block, with all six dynamic fields still zeroed.
+    Returns {"text": ..., "offsets": {field: local_char_offset, ...}}
+    """
+    rng = random.Random(secrets.randbits(64))
+    used = reserved_names
+    (v_exp, v_start, v_end, v_rel_exp, v_rel_start, v_rel_end,
+     v_region, v_canon, v_actual) = (
+        random_confusable_name(rng, used, length=rng.randint(6, 11)) for _ in range(9)
+    )
+
+    lines: list[str] = []
+    offsets: dict[str, int] = {}
+    cursor = 0
+
+    def add(line: str, field: str | None = None, field_off: int | None = None) -> None:
+        nonlocal cursor
+        if field is not None:
+            offsets[field] = cursor + field_off
+        lines.append(line)
+        cursor += len(line) + 1  # +1 for the "\n" this block will be joined with
+
+    for field, name, width in (
+        ("exp", v_exp, _RING_DIGEST_WIDTH),
+        ("start", v_start, _RING_OFFSET_WIDTH),
+        ("end", v_end, _RING_OFFSET_WIDTH),
+        ("rel_exp", v_rel_exp, _RING_OFFSET_WIDTH),
+        ("rel_start", v_rel_start, _RING_OFFSET_WIDTH),
+        ("rel_end", v_rel_end, _RING_OFFSET_WIDTH),
+    ):
+        line, off = _ring_field(name, width)
+        add(line, field, off)
+
+    hash_ref = _hidden_import_attr("hashlib", "sha256", rng)
+    exit_ref = _hidden_import_attr("sys", "exit", rng)
+    utf8_lit = _hidden_str_expr("utf-8", rng)
+    encode_str = _hidden_str_expr("encode", rng)
+    hexdigest_str = _hidden_str_expr("hexdigest", rng)
+
+    add(f"{v_region} = {src_var}[int({v_start}):int({v_end})]")
+    add(f"{v_canon} = {v_region}[:int({v_rel_exp})] + '{'0' * _RING_DIGEST_WIDTH}' "
+        f"+ {v_region}[int({v_rel_exp}) + {_RING_DIGEST_WIDTH}:]")
+    add(f"{v_canon} = {v_canon}[:int({v_rel_start})] + '{'0' * _RING_OFFSET_WIDTH}' "
+        f"+ {v_canon}[int({v_rel_start}) + {_RING_OFFSET_WIDTH}:]")
+    add(f"{v_canon} = {v_canon}[:int({v_rel_end})] + '{'0' * _RING_OFFSET_WIDTH}' "
+        f"+ {v_canon}[int({v_rel_end}) + {_RING_OFFSET_WIDTH}:]")
+    add(f"{v_actual} = getattr({hash_ref}(getattr({v_canon}, {encode_str})({utf8_lit})), {hexdigest_str})()")
+
+    style = style % 3
+    if style == 0:
+        add(f"if {v_actual} != {v_exp}: {exit_ref}(1)")
+    elif style == 1:
+        add("try:")
+        add(f"    if {v_actual} != {v_exp}: raise ValueError")
+        add(f"except Exception: {exit_ref}(1)")
+    else:
+        add(f"({exit_ref}(1)) if {v_actual} != {v_exp} else None")
+
+    return {"text": "\n".join(lines), "offsets": offsets}
+
+
+def build_ring_checks(src_var: str, n_checks: int, reserved_names: set) -> str | None:
+    """
+    Build n_checks ring-wired self-hash blocks.
+    Returns None -> caller treats this the same as any other
+    "don't wrap" signal -> if n_checks can't form a ring (<2) or
+    anything about the generated layout fails to round-trip.
+    """
+    if n_checks < 2:
+        return None
+    try:
+        blocks = [_one_ring_block(src_var, i % 3, reserved_names) for i in range(n_checks)]
+        texts = [b["text"] for b in blocks]
+
+        starts: list[int] = []
+        cursor = 0
+        for t in texts:
+            starts.append(cursor)
+            cursor += len(t) + 1
+        lengths = [len(t) for t in texts]
+
+        # Step 3: rel_* trios -> pure layout facts, no ordering hazard.
+        for i in range(n_checks):
+            tgt = blocks[(i + 1) % n_checks]
+            texts[i] = _positional_patch(texts[i], blocks[i]["offsets"]["rel_exp"],
+                                          _fixed_digits(tgt["offsets"]["exp"]))
+            texts[i] = _positional_patch(texts[i], blocks[i]["offsets"]["rel_start"],
+                                          _fixed_digits(tgt["offsets"]["start"]))
+            texts[i] = _positional_patch(texts[i], blocks[i]["offsets"]["rel_end"],
+                                          _fixed_digits(tgt["offsets"]["end"]))
+
+        # Step 4: hash each target's current (rel_*-filled, exp/start/end
+        # still zero) text -> the canonical form runtime reconstructs.
+        digests = [
+            hashlib.sha256(texts[(i + 1) % n_checks].encode("utf-8")).hexdigest()
+            for i in range(n_checks)
+        ]
+
+        # Step 5: fill in exp (the digest above) and start/end (the layout).
+        for i in range(n_checks):
+            tgt_idx = (i + 1) % n_checks
+            texts[i] = _positional_patch(texts[i], blocks[i]["offsets"]["exp"], digests[i])
+            texts[i] = _positional_patch(texts[i], blocks[i]["offsets"]["start"],
+                                          _fixed_digits(starts[tgt_idx]))
+            texts[i] = _positional_patch(texts[i], blocks[i]["offsets"]["end"],
+                                          _fixed_digits(starts[tgt_idx] + lengths[tgt_idx]))
+
+        assembled = "\n".join(texts)
+
+        # Sanity check: reconstruct the same canonical form a runtime check would,
+        # straight from the assembled text and confirm it matches what got
+        # embedded. If this doesn't hold, the ring's math is wrong and
+        # every build using it would brick itself at startup.
+        for i in range(n_checks):
+            tgt_idx = (i + 1) % n_checks
+            region = assembled[starts[tgt_idx]: starts[tgt_idx] + lengths[tgt_idx]]
+            off = blocks[tgt_idx]["offsets"]
+            canon = (region[:off["exp"]] + "0" * _RING_DIGEST_WIDTH
+                     + region[off["exp"] + _RING_DIGEST_WIDTH:])
+            canon = (canon[:off["start"]] + "0" * _RING_OFFSET_WIDTH
+                     + canon[off["start"] + _RING_OFFSET_WIDTH:])
+            canon = (canon[:off["end"]] + "0" * _RING_OFFSET_WIDTH
+                     + canon[off["end"] + _RING_OFFSET_WIDTH:])
+            if hashlib.sha256(canon.encode("utf-8")).hexdigest() != digests[i]:
+                return None
+
+        compile(assembled, "<ring_check_wrapper_check>", "exec")
+        return assembled
+    except Exception:
+        return None
+
+
 def _split_chunks(text: str, rng: random.Random) -> list[str]:
     """
     Break "text" into random-length pieces at random cut points,
@@ -282,13 +464,22 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_ch
 
 
 def wrap_with_self_hash(
-    body_text: str, src_var: str, n_checks: int = 3, reserved_names: set | None = None,
-    encode_chunks: bool = True,
+    body_text: str, src_var: str, n_checks: int = 4, reserved_names: set | None = None,
+    encode_chunks: bool = True, ring: bool = True,
 ) -> str:
     """
-    Prepend n_checks independent self-hash check blocks to body_text,
-    then wrap the whole thing so the checks can see their own exact
-    source text via <src_var> at runtime.
+    Prepend n_checks self-hash check blocks to body_text, then wrap the
+    whole thing so the checks can see their own exact source text via
+    <src_var> at runtime.
+
+    ring: when True (the default) and n_checks >= 2, the checks are
+    wired into a ring -> block i verifies block
+    (i+1) % n_checks's own exact region, wrapping back to block 0, so
+    disabling any single block changes bytes a DIFFERENT block is
+    watching. When False (or n_checks < 2), falls back to the original
+    scheme: n_checks independent copies that each hash the whole body
+    against one shared digest -> still redundant, but an attacker who
+    finds any one copy has found all the protection there is. (not reccomended)
 
     encode_chunks: see _build_wrapper. Pass False when the caller
     knows pack_source() will compress this result afterward -> the
@@ -297,22 +488,28 @@ def wrap_with_self_hash(
     """
     reserved_names = set(reserved_names) if reserved_names else set()
     try:
-        checks: list[str] = []
-        for i in range(n_checks):
-            checks.extend(_one_check_block(src_var, style=i % 3, reserved_names=reserved_names))
+        if ring and n_checks >= 2:
+            checks_text = build_ring_checks(src_var, n_checks, reserved_names)
+            if checks_text is None:
+                return body_text
+            final_body = checks_text + "\n" + body_text
+        else:
+            checks: list[str] = []
+            for i in range(n_checks):
+                checks.extend(_one_check_block(src_var, style=i % 3, reserved_names=reserved_names))
 
-        pre_sub = "\n".join(checks) + "\n" + body_text
+            pre_sub = "\n".join(checks) + "\n" + body_text
 
-        if pre_sub.count(PLACEHOLDER_DIGEST) != n_checks:
-            return body_text  # something's off; return unwrapped rather than guess
+            if pre_sub.count(PLACEHOLDER_DIGEST) != n_checks:
+                return body_text  # something's off; return unwrapped rather than guess
 
-        digest = hashlib.sha256(pre_sub.encode("utf-8")).hexdigest()
-        final_body = pre_sub.replace(PLACEHOLDER_DIGEST, digest)
+            digest = hashlib.sha256(pre_sub.encode("utf-8")).hexdigest()
+            final_body = pre_sub.replace(PLACEHOLDER_DIGEST, digest)
 
-        # Correctness sanity check on the digest scheme itself, independent of how the wrapper below chooses to lay the text out.
-        reconstructed = final_body.replace(digest, PLACEHOLDER_DIGEST)
-        if hashlib.sha256(reconstructed.encode("utf-8")).hexdigest() != digest:
-            return body_text
+            # Correctness sanity check on the digest scheme itself, independent of how the wrapper below chooses to lay the text out.
+            reconstructed = final_body.replace(digest, PLACEHOLDER_DIGEST)
+            if hashlib.sha256(reconstructed.encode("utf-8")).hexdigest() != digest:
+                return body_text
 
         wrapped = _build_wrapper(final_body, src_var, reserved_names, encode_chunks=encode_chunks)
         compile(wrapped, "<selfhash_wrapper>", "exec")
