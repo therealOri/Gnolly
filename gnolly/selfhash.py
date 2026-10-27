@@ -58,7 +58,7 @@ def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]
         random_confusable_name(rng, used, length=rng.randint(6, 11)) for _ in range(3)
     )
 
-    exit_ref = _hidden_import_attr("sys", "exit", rng)
+    exit_ref = _hidden_import_attr("os", "exit", rng)
     lines = []
     a = lines.append
 
@@ -173,7 +173,7 @@ def _one_ring_block(src_var: str, style: int, reserved_names: set) -> dict:
         add(line, field, off)
 
     hash_ref = _hidden_import_attr("hashlib", "sha256", rng)
-    exit_ref = _hidden_import_attr("sys", "exit", rng)
+    exit_ref = _hidden_import_attr("os", "exit", rng)
     utf8_lit = _hidden_str_expr("utf-8", rng)
     encode_str = _hidden_str_expr("encode", rng)
     hexdigest_str = _hidden_str_expr("hexdigest", rng)
@@ -325,7 +325,7 @@ def _chunk_guard_lines(
         victim = chunk_vars[rng.randrange(idx)]
         response = f"{victim} = {victim}[:0]"
     else:
-        exit_ref = _hidden_import_attr("sys", "exit", rng)
+        exit_ref = _hidden_import_attr("os", "exit", rng)
         response = f"{exit_ref}(1)"
 
     len_lit = _render_int(expected_len, rng)
