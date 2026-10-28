@@ -341,12 +341,12 @@ def generate_stub(
 
     # ── State machine ─────────────────────────────────────────────────────────
     hash_hex  = hashlib.sha256(blob_raw_bytes).hexdigest()
-    magic_b   = b'GNLY\x02\x00'
+    magic_b   = b'GNLY\x01\x00'
     S = {i: obn(i) for i in range(_SDONE + 1)}
 
     # ── State machine variables ──────────────────────────────────────────────
     hash_hex  = hashlib.sha256(blob_raw_bytes).hexdigest()
-    magic_b   = b'GNLY\x02\x00'
+    magic_b   = b'GNLY\x01\x00'
     S = {i: obn(i) for i in range(9)}  # obfuscated state IDs 0-8
 
     # Precompute all encoded strings needed across states
