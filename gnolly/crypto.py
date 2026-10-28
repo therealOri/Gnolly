@@ -15,7 +15,7 @@ from argon2.low_level import hash_secret_raw, Type as _Argon2Type
 
 # ── constants ─────────────────────────────────────────────────────────────────
 _MAGIC    = b"GNLY"          # 4-byte file magic
-_VERSION  = b"\x02\x00"      # format version 2.0
+_VERSION  = b"\x01\x00"      # format version 1.0
 _SALT_LEN = 32
 _IV_LEN   = 12
 _TAG_LEN  = 16
