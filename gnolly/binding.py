@@ -5,25 +5,26 @@ Machine/platform binding.
 
 How it works
 ------------
-The machine fingerprint is silently folded into the Argon2id salt before
-key derivation.  The encrypted payload can only be decrypted on a machine
-whose fingerprint produces the same derived key.
+The machine fingerprint is silently folded into the password before key
+derivation -> the same HMAC-fold idiom gnolly.integrity and gnolly.poison
+use, just with the fingerprint as the
+fold material.
 
-At protect time:
-    fp = collect_fingerprint()               # developer supplies target fp
-    effective_salt = HMAC(salt, fp)          # fold fp into salt
-    derived_key = Argon2id(password, effective_salt)
+At protect time (see pipeline.py):
+    fp = collect_fingerprint()                      # developer supplies target fp
+    effective_password = HMAC(key=fp, msg=password)  # fold fp into password
+    derived_key = Argon2id(effective_password, salt)
     encrypt(payload, derived_key)
 
 At runtime:
-    fp = collect_fingerprint()               # this machine's fp
-    effective_salt = HMAC(salt, fp)
-    derived_key = Argon2id(password, effective_salt)
-    decrypt(payload, derived_key)            # GCM auth fails if fp wrong
+    fp = collect_fingerprint()                      # this machine's fp
+    effective_password = HMAC(key=fp, msg=password)
+    derived_key = Argon2id(effective_password, salt)
+    decrypt(payload, derived_key)                   # GCM auth fails if fp wrong
 
-There is no explicit "machine check". The wrong fingerprint silently produces
-the wrong key, which fails AES-GCM authentication.  The user sees only
-"Wrong key, corrupted file, or nothing."
+The wrong fingerprint silently produces
+the wrong password, which would produce the wrong key, which fails AES-GCM
+authentication.
 
 Developer workflow
 ------------------
@@ -41,7 +42,6 @@ once at OS install and never change.
 """
 from __future__ import annotations
 import hashlib
-import hmac
 import socket
 import sys
 import uuid
@@ -138,23 +138,6 @@ def collect_fingerprint(*, require: bool = False) -> bytes | None:
     for k, v in sorted(components):
         h.update(f'{k}={v}\n'.encode())
     return h.digest()   # 32 bytes
-
-
-def bind_salt(salt: bytes, fingerprint: bytes) -> bytes:
-    """
-    Derive a machine-bound salt by folding the fingerprint into the
-    original Argon2id salt via HMAC-SHA256.
-
-    Parameters
-    ----------
-    salt        : original random salt (32 bytes)
-    fingerprint : 32-byte machine fingerprint from collect_fingerprint()
-
-    Returns
-    -------
-    32-byte effective salt that embeds the machine identity
-    """
-    return hmac.new(fingerprint, salt, hashlib.sha256).digest()
 
 
 def fingerprint_hex() -> str:
