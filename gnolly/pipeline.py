@@ -15,9 +15,6 @@ Orchestrates the full Gnolly protection pipeline:
               │
               └─ protected_output.gnly.py
 
-NOTE: The legacy marshal+exec path has been removed.  All protected files
-      now require both _gnolly_core.so (crypto/decryption) and
-      _gnolly_vm.so (GIR interpreter) to be present at runtime.
 
 Code layout (after AES-GCM decrypt + decompress):
     b'\x01'                     VM-mode flag (1 byte)
@@ -41,7 +38,7 @@ from .stub        import generate_stub
 from .minify      import minify_source
 from .pack        import pack_source
 from .build_core  import ensure_core
-from .binding     import bind_salt, collect_fingerprint, fingerprint_from_hex
+from .binding     import collect_fingerprint, fingerprint_from_hex
 from .integrity   import collect_runtime_hashes, fold_integrity
 from .poison      import fold_poison
 from .ptrace_guard import DEFAULT_HEARTBEAT_MIN_DELAY, DEFAULT_HEARTBEAT_MAX_DELAY
