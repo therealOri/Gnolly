@@ -26,6 +26,7 @@ import secrets
 from .namegen import random_confusable_name
 from .strcodec import _enc_str
 from .poison import poison_mark_expr
+from .relay import repeatable_call_expr, _REPEATABLE_STYLE_COUNT
 
 
 # Known debugger / analysis module names -> encoded so they don't appear plaintext
@@ -97,10 +98,20 @@ def generate_antidebug_lines(
     vt, vp, vm, vmod, vt2, vt3 = (
         random_confusable_name(_tv_rng, _tv_used, 6) for _ in range(6))
 
-    exit_call = (
-        poison_mark_expr(poison_var, obn) if poison_var is not None
-        else f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
-    )
+    if poison_var is not None:
+        exit_call = poison_mark_expr(poison_var, obn)
+    else:
+        # The reaction (sys.exit(1)) is the one part of these
+        # checks that looks like a payload rather than normal stub
+        # noise. We will route it through the same relay disguises used
+        # elsewhere, reused across every check site below instead of
+        # creating fresh plumbing per check.
+        _relay_rng = random.Random(secrets.randbits(64))
+        _exit_setup, exit_call = repeatable_call_expr(
+            f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})",
+            _relay_rng, _relay_rng.randrange(_REPEATABLE_STYLE_COUNT), _tv_used,
+        )
+        lines.extend(_exit_setup)
 
     # ── Check 1: trace hook ───────────────────────────────────────────────────
     a(f"{vt} = getattr({h_sys}, {s('gettrace')})()")
@@ -181,12 +192,18 @@ def generate_timing_check_lines(
     def s(text: str) -> str:
         return f"{s_fn}({enc(text)})"
 
-    exit_call = (
-        poison_mark_expr(poison_var, obn) if poison_var is not None
-        else f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
-    )
     _tc_rng = random.Random(secrets.randbits(64))
-    vt3 = random_confusable_name(_tc_rng, set(), 6)
+    _tc_used: set = set()
+    vt3 = random_confusable_name(_tc_rng, _tc_used, 6)
+
+    if poison_var is not None:
+        exit_call = poison_mark_expr(poison_var, obn)
+    else:
+        _exit_setup, exit_call = repeatable_call_expr(
+            f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})",
+            _tc_rng, _tc_rng.randrange(_REPEATABLE_STYLE_COUNT), _tc_used,
+        )
+        lines.extend(_exit_setup)
 
     a(f"{vt3} = getattr({imp_fn}({s('time')}), {s('perf_counter')})()")
     # min_seconds obfuscated as a/b float expression
@@ -230,13 +247,18 @@ def generate_slow_timing_check_lines(
     def s(text: str) -> str:
         return f"{s_fn}({enc(text)})"
 
-    exit_call = (
-        poison_mark_expr(poison_var, obn) if poison_var is not None
-        else f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})"
-    )
     rng = random.Random(secrets.randbits(64))
     used: set = set()
     vt0, vt1, vi, vacc = (random_confusable_name(rng, used, length=rng.randint(6, 11)) for _ in range(4))
+
+    if poison_var is not None:
+        exit_call = poison_mark_expr(poison_var, obn)
+    else:
+        _exit_setup, exit_call = repeatable_call_expr(
+            f"getattr({h_sys}, {s_fn}({exit_enc}))({obn(1)})",
+            rng, rng.randrange(_REPEATABLE_STYLE_COUNT), used,
+        )
+        lines.extend(_exit_setup)
 
     a(f"{vt0} = getattr({imp_fn}({s('time')}), {s('perf_counter')})()")
     a(f"{vacc} = {obn(0)}")
