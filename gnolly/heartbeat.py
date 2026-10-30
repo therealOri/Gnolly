@@ -55,9 +55,12 @@ mismatch, not silently skipped. Worth knowing: an unrelated runtime hiccup touch
 watched files (permissions, an antivirus lock, or a rebuild landing mid-run, etc.) on a long-running process will also end it.
 """
 from __future__ import annotations
+import random
+import secrets
 from .strcodec import _enc_str
 from .antidebug import _DEBUG_MODULES
 from .poison import _POISON_MASK
+from .relay import repeatable_call_expr, _REPEATABLE_STYLE_COUNT
 
 DEFAULT_MIN_DELAY = 0.4
 DEFAULT_MAX_DELAY = 1.0
@@ -146,6 +149,13 @@ def generate_python_heartbeat_lines(
         a(f"{em(v_so_bases, 'append', em(em(v_hash_mod, 'sha256', em(pvar, 'read_bytes')), 'digest'))}")
 
     # ── Loop body ─────────────────────────────────────────────────────────
+    _hb_rng = random.Random(secrets.randbits(64))
+    _hb_used: set = set()
+    kill_setup, kill_expr = repeatable_call_expr(
+        em(h_os, "_exit", obn(1)), _hb_rng, _hb_rng.randrange(_REPEATABLE_STYLE_COUNT), _hb_used,
+    )
+    lines.extend(kill_setup)
+
     a(f"def {v_fn}():")
     a(f"    while {sing('True')}:")
     a(f"        try:")
@@ -156,33 +166,33 @@ def generate_python_heartbeat_lines(
     if check_self_hash:
         a(f"            {v_cur} = {em(em(v_hash_mod, 'sha256', em(src_var, 'encode', s('utf-8'))), 'digest')}")
         a(f"            if {v_cur} != {v_src_base}:")
-        a(f"                {em(h_os, '_exit', obn(1))}")
+        a(f"                {kill_expr}")
 
     # 2. re-hash both compiled extensions from disk, in the order their baselines were appended.
     for i, pvar in enumerate(so_path_vars):
         a(f"            {v_cur} = {em(em(v_hash_mod, 'sha256', em(pvar, 'read_bytes')), 'digest')}")
         a(f"            if {v_cur} != {v_so_bases}[{obn(i)}]:")
-        a(f"                {em(h_os, '_exit', obn(1))}")
+        a(f"                {kill_expr}")
 
     # 3. antidebug signals -> the same ones gnolly.antidebug checks once and re-checked fresh every pass.
     a(f"            if {em(h_sys, 'gettrace')} is not {sing('None')}:")
-    a(f"                {em(h_os, '_exit', obn(1))}")
+    a(f"                {kill_expr}")
     a(f"            if {em(h_sys, 'getprofile')} is not {sing('None')}:")
-    a(f"                {em(h_os, '_exit', obn(1))}")
+    a(f"                {kill_expr}")
     a(f"            {v_mods} = getattr({h_sys}, {s('modules')})")
     _mod_list = ", ".join(s(mod) for mod in _DEBUG_MODULES)
     a(f"            if any({v_mod_iter} in {v_mods} for {v_mod_iter} in [{_mod_list}]):")
-    a(f"                {em(h_os, '_exit', obn(1))}")
+    a(f"                {kill_expr}")
 
     # 4. gnolly.poison's accumulator, folded into this same loop.
     if poison_var is not None:
         a(f"            if {poison_var} & {obn(_POISON_MASK)}:")
-        a(f"                {em(h_os, '_exit', obn(1))}")
+        a(f"                {kill_expr}")
 
     # Fail-closed: anything going wrong inside the probe itself is treated the same as
     # a detected mismatch rather than being silently skipped.
     a(f"        except Exception:")
-    a(f"            {em(h_os, '_exit', obn(1))}")
+    a(f"            {kill_expr}")
 
     a(f"{v_thread} = getattr({imp_fn}({s('threading')}), {s('Thread')})(target={v_fn}, daemon={sing('True')})")
     a(f"{em(v_thread, 'start')}")
