@@ -49,6 +49,7 @@ import random
 import secrets
 from .namegen import random_confusable_name
 from .strcodec import _enc_str, _enc_bytes_as_str
+from .relay import one_shot_call_lines, _ONE_SHOT_STYLE_COUNT
 
 # Domain separation from binding.py's _BIND_DOMAIN and integrity.py's
 # _INTEGRITY_DOMAIN -> all three folds must never be confusable with
@@ -163,11 +164,23 @@ def generate_poison_watch_lines(
         random_confusable_name(rng, used, length=rng.randint(6, 11)) for _ in range(4)
     )
 
+    # The kill itself (os._exit) of this watcher looks like a payload.
+    # We will route it through the same relay disguises we use elsewhere. 
+    # Setup runs before the timer callback is even defined and the fire statement is the only thing that 
+    # actually runs inside the callback body.
+    kill_setup, kill_fire = one_shot_call_lines(
+        f"getattr({h_os}, {s('_exit')})({obn(1)})",
+        rng, rng.randrange(_ONE_SHOT_STYLE_COUNT), used,
+    )
+
     a(f"{v_rnd} = {imp_fn}({s('random')})")
     a(f"{v_delay} = getattr({v_rnd}, {s('uniform')})({min_delay!r}, {max_delay!r})")
+    for line in kill_setup:
+        a(line)
     a(f"def {v_fn}():")
     a(f"    if {poison_var} & {obn(_POISON_MASK)}:")
-    a(f"        getattr({h_os}, {s('_exit')})({obn(1)})")
+    for line in kill_fire:
+        a(f"        {line}")
     a(f"{v_thr} = getattr({imp_fn}({s('threading')}), {s('Timer')})({v_delay}, {v_fn})")
     a(f"setattr({v_thr}, {s('daemon')}, True)")
     a(f"getattr({v_thr}, {s('start')})()")
