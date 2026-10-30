@@ -33,6 +33,7 @@ import secrets
 from pathlib import Path
 from .namegen import random_confusable_name
 from .strcodec import _enc_str
+from .relay import one_shot_call_lines, _ONE_SHOT_STYLE_COUNT
 
 
 def get_core_so_hash() -> str | None:
@@ -232,7 +233,15 @@ def generate_import_hook_lines(
     a(f"    {v_mod}  = {em(v_iutil, 'module_from_spec', v_spec)}")
     _loader_enc = _enc_str("loader", str_key)
     _exec_enc   = _enc_str("exec_module", str_key)
-    a(f"    getattr(getattr({v_spec}, {s_fn}({_loader_enc})), {s_fn}({_exec_enc}))({v_mod})")
+    _ih_used: set = set()
+    exec_setup, exec_fire = one_shot_call_lines(
+        f"getattr(getattr({v_spec}, {s_fn}({_loader_enc})), {s_fn}({_exec_enc}))({v_mod})",
+        _rng, _rng.randrange(_ONE_SHOT_STYLE_COUNT), _ih_used,
+    )
+    for line in exec_setup:
+        a(f"    {line}")
+    for line in exec_fire:
+        a(f"    {line}")
 
     if module_stem == "_gnolly_core":
         a(f"    {cr_var} = getattr({v_mod}, {enc('gnolly_run')})")
