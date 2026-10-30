@@ -10,6 +10,10 @@ import random
 import secrets
 from .namegen import random_confusable_name
 from .strcodec import _hidden_str_expr, _hidden_import_attr, _render_int, _hidden_exec_ref
+from .relay import (
+    one_shot_call_lines, repeatable_call_expr,
+    _ONE_SHOT_STYLE_COUNT, _REPEATABLE_STYLE_COUNT,
+)
 
 # 64 literal ASCII '0' chars -> exactly a sha256 hexdigest's width. This
 # exact run must appear in the body text ONLY where check blocks put it;
@@ -58,7 +62,7 @@ def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]
         random_confusable_name(rng, used, length=rng.randint(6, 11)) for _ in range(3)
     )
 
-    exit_ref = _hidden_import_attr("os", "exit", rng)
+    exit_ref = _hidden_import_attr("os", "_exit", rng)
     lines = []
     a = lines.append
 
@@ -77,14 +81,23 @@ def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]
     hexdigest_str = _hidden_str_expr("hexdigest", rng)
     a(f"{v_re} = getattr({hash_ref}(getattr({v_can}, {encode_str})({utf8_lit})), {hexdigest_str})()")
 
+    # The reaction itself (os._exit(1)) is the one part of this block
+    # that looks like a payload rather than bookkeeping -> route it
+    # through the same relay disguises used elsewhere instead of a
+    # bare NAME(1) call.
+    exit_setup, exit_expr = repeatable_call_expr(
+        f"{exit_ref}(1)", rng, rng.randrange(_REPEATABLE_STYLE_COUNT), used,
+    )
+    lines.extend(exit_setup)
+
     if style == 0:
-        a(f"if {v_re} != {v_exp}: {exit_ref}(1)")
+        a(f"if {v_re} != {v_exp}: {exit_expr}")
     elif style == 1:
         a(f"try:")
         a(f"    if {v_re} != {v_exp}: raise ValueError")
-        a(f"except Exception: {exit_ref}(1)")
+        a(f"except Exception: {exit_expr}")
     else:
-        a(f"({exit_ref}(1)) if {v_re} != {v_exp} else None")
+        a(f"({exit_expr}) if {v_re} != {v_exp} else None")
 
     return lines
 
@@ -173,7 +186,7 @@ def _one_ring_block(src_var: str, style: int, reserved_names: set) -> dict:
         add(line, field, off)
 
     hash_ref = _hidden_import_attr("hashlib", "sha256", rng)
-    exit_ref = _hidden_import_attr("os", "exit", rng)
+    exit_ref = _hidden_import_attr("os", "_exit", rng)
     utf8_lit = _hidden_str_expr("utf-8", rng)
     encode_str = _hidden_str_expr("encode", rng)
     hexdigest_str = _hidden_str_expr("hexdigest", rng)
@@ -187,15 +200,21 @@ def _one_ring_block(src_var: str, style: int, reserved_names: set) -> dict:
         f"+ {v_canon}[int({v_rel_end}) + {_RING_OFFSET_WIDTH}:]")
     add(f"{v_actual} = getattr({hash_ref}(getattr({v_canon}, {encode_str})({utf8_lit})), {hexdigest_str})()")
 
+    exit_setup, exit_expr = repeatable_call_expr(
+        f"{exit_ref}(1)", rng, rng.randrange(_REPEATABLE_STYLE_COUNT), used,
+    )
+    for line in exit_setup:
+        add(line)
+
     style = style % 3
     if style == 0:
-        add(f"if {v_actual} != {v_exp}: {exit_ref}(1)")
+        add(f"if {v_actual} != {v_exp}: {exit_expr}")
     elif style == 1:
         add("try:")
         add(f"    if {v_actual} != {v_exp}: raise ValueError")
-        add(f"except Exception: {exit_ref}(1)")
+        add(f"except Exception: {exit_expr}")
     else:
-        add(f"({exit_ref}(1)) if {v_actual} != {v_exp} else None")
+        add(f"({exit_expr}) if {v_actual} != {v_exp} else None")
 
     return {"text": "\n".join(lines), "offsets": offsets}
 
@@ -325,7 +344,7 @@ def _chunk_guard_lines(
         victim = chunk_vars[rng.randrange(idx)]
         response = f"{victim} = {victim}[:0]"
     else:
-        exit_ref = _hidden_import_attr("os", "exit", rng)
+        exit_ref = _hidden_import_attr("os", "_exit", rng)
         response = f"{exit_ref}(1)"
 
     len_lit = _render_int(expected_len, rng)
@@ -342,64 +361,6 @@ def _chunk_guard_lines(
         a(f"except ValueError:")
         a(f"    {response}")
     return lines
-
-
-def _trigger_lines(src_var: str, rng: random.Random, style: int, reserved_names: set) -> list[str]:
-    """
-    A few different ways to actually run "src_var" as code. All three
-    styles trigger exec() as a side effect of ordinary-looking
-    class construction rather than a direct, bare call.
-    """
-    used = reserved_names
-    style = style % 3
-    exec_ref = _hidden_exec_ref(rng)
-    if style == 0:
-        meta_name, cls_name, fn_name = (
-            random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
-        )
-        p_mcs, p_name, p_bases, p_ns = (random_confusable_name(rng, used, 1) for _ in range(4))
-        new_str = _hidden_str_expr("__new__", rng)
-        return [
-            f"class {meta_name}(type):",
-            f"    pass",
-            f"def {fn_name}({p_mcs}, {p_name}, {p_bases}, {p_ns}):",
-            f"    ({exec_ref})({src_var}, globals())",
-            f"    return getattr(type, {new_str})({p_mcs}, {p_name}, {p_bases}, {p_ns})",
-            f"setattr({meta_name}, {new_str}, {fn_name})",
-            f"class {cls_name}(metaclass={meta_name}):",
-            f"    pass",
-        ]
-    elif style == 1:
-        desc_name, cls_name, attr_name, fn_name = (
-            random_confusable_name(rng, used, length=rng.randint(6, 12)) for _ in range(4)
-        )
-        p_self, p_owner, p_ownname = (random_confusable_name(rng, used, 1) for _ in range(3))
-        set_name_str = _hidden_str_expr("__set_name__", rng)
-        return [
-            f"class {desc_name}:",
-            f"    pass",
-            f"def {fn_name}({p_self}, {p_owner}, {p_ownname}):",
-            f"    ({exec_ref})({src_var}, globals())",
-            f"setattr({desc_name}, {set_name_str}, {fn_name})",
-            f"class {cls_name}:",
-            f"    {attr_name} = {desc_name}()",
-        ]
-    else:
-        base_name, sub_name, fn_name = (
-            random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
-        )
-        p_cls, p_kw = (random_confusable_name(rng, used, 1) for _ in range(2))
-        init_sub_str = _hidden_str_expr("__init_subclass__", rng)
-        classmethod_ref = _hidden_import_attr("builtins", "classmethod", rng)
-        return [
-            f"class {base_name}:",
-            f"    pass",
-            f"def {fn_name}({p_cls}, **{p_kw}):",
-            f"    ({exec_ref})({src_var}, globals())",
-            f"setattr({base_name}, {init_sub_str}, {classmethod_ref}({fn_name}))",
-            f"class {sub_name}({base_name}):",
-            f"    pass",
-        ]
 
 
 def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_chunks: bool = True) -> str:
@@ -424,6 +385,15 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_ch
     chunks = _split_chunks(final_body, rng)
     chunk_vars = [random_confusable_name(rng, used, length=rng.randint(8, 13)) for _ in chunks]
 
+    # The setup plumbing can be dropped in among the
+    # chunk-building lines below instead of appearing as a separate, conspicuous block of its own.
+    # None of the setup_lines touches src_var's actual value, so it's safe to place anywhere before fire_lines runs.
+    exec_ref = _hidden_exec_ref(rng)
+    trigger_setup, trigger_fire = one_shot_call_lines(
+        f"({exec_ref})({src_var}, globals())", rng, rng.randrange(_ONE_SHOT_STYLE_COUNT), used,
+    )
+    setup_after_idx = rng.randrange(len(chunk_vars)) if chunk_vars else -1
+
     lines = []
     a = lines.append
     if encode_chunks:
@@ -435,6 +405,9 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_ch
         a(f"{u8_var} = {utf8_expr}")
         a(f"{dec_var} = {dec_expr}")
 
+    if setup_after_idx == -1:
+        lines.extend(trigger_setup)
+
     for idx, (cv, chunk) in enumerate(zip(chunk_vars, chunks)):
         rendered = _encode_chunk(chunk, rng, b85_var, u8_var, dec_var) if encode_chunks else repr(chunk)
         a(f"{cv} = {rendered}")
@@ -443,6 +416,8 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_ch
         # already compresses this and there's nothing to defend here.
         if encode_chunks:
             lines.extend(_chunk_guard_lines(chunk_vars, idx, len(chunk), rng, used))
+        if idx == setup_after_idx:
+            lines.extend(trigger_setup)
 
     a(f"{src_var} = {_recombine_expr(chunk_vars, rng)}")
 
@@ -453,7 +428,9 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_ch
         batch = all_null[i : i + 6]
         a(" = ".join(batch) + " = None")
 
-    lines.extend(_trigger_lines(src_var, rng, rng.randrange(3), used))
+    # Only the final firing statement needs to land here (after
+    # src_var is actually populated) -> the plumbing it calls into is already interwoven above.
+    lines.extend(trigger_fire)
 
     wrapper_text = "\n".join(lines)
     try:
