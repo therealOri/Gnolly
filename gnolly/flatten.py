@@ -25,6 +25,7 @@ import secrets
 from .namegen import random_confusable_name
 from .strcodec import _enc_str, _bool_int_expr, _render_int, _hidden_exec_ref
 from .minify import minify_source
+from .relay import one_shot_call_lines, _ONE_SHOT_STYLE_COUNT
 
 __all__ = ["flatten_source"]
 
@@ -83,6 +84,10 @@ def _exec_hide(block: list[str], s_fn: str, str_key: bytes,
     """
     Returns lines that decode and run the block's text
     without it ever appearing as parseable Python source in the file.
+
+    Routed through gnolly.relay's full one-shot style set.
+    Every hidden block in a given build can independently land on a different one of the 11 shapes,
+    rather than all of them cycling through the same 3.
     """
     dedented = _dedent_block(block)
     text = "\n".join(dedented)
@@ -102,53 +107,16 @@ def _exec_hide(block: list[str], s_fn: str, str_key: bytes,
         return None
 
     decode_call = f"{s_fn}({encoded_expr})"
-    style = rng.randrange(3)
     exec_ref = _hidden_exec_ref(rng)
-
-    if style == 0:
-        return [f"({exec_ref})({decode_call}, globals())"]
-
-    elif style == 1:
-        meta_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
-        cls_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
-        fn_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
-        local_used: set = set()
-        p_mcs, p_name, p_bases, p_ns = (random_confusable_name(rng, local_used, 1) for _ in range(4))
-        try:
-            new_enc = _enc_str("__new__", str_key)
-        except Exception:
-            return [f"({exec_ref})({decode_call}, globals())"]
-        return [
-            f"class {meta_name}(type):",
-            f"    pass",
-            f"def {fn_name}({p_mcs}, {p_name}, {p_bases}, {p_ns}):",
-            f"    ({exec_ref})({decode_call}, globals())",
-            f"    return getattr(type, {s_fn}({new_enc}))({p_mcs}, {p_name}, {p_bases}, {p_ns})",
-            f"setattr({meta_name}, {s_fn}({new_enc}), {fn_name})",
-            f"class {cls_name}(metaclass={meta_name}):",
-            f"    pass",
-        ]
-
-    else:
-        desc_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
-        cls_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
-        attr_name = random_confusable_name(rng, used_names, length=rng.randint(6, 10))
-        fn_name = random_confusable_name(rng, used_names, length=rng.randint(7, 12))
-        local_used = set()
-        p_self, p_owner, p_ownname = (random_confusable_name(rng, local_used, 1) for _ in range(3))
-        try:
-            set_name_enc = _enc_str("__set_name__", str_key)
-        except Exception:
-            return [f"({exec_ref})({decode_call}, globals())"]
-        return [
-            f"class {desc_name}:",
-            f"    pass",
-            f"def {fn_name}({p_self}, {p_owner}, {p_ownname}):",
-            f"    ({exec_ref})({decode_call}, globals())",
-            f"setattr({desc_name}, {s_fn}({set_name_enc}), {fn_name})",
-            f"class {cls_name}:",
-            f"    {attr_name} = {desc_name}()",
-        ]
+    plain_fallback = [f"({exec_ref})({decode_call}, globals())"]
+    try:
+        setup, fire = one_shot_call_lines(
+            f"({exec_ref})({decode_call}, globals())",
+            rng, rng.randrange(_ONE_SHOT_STYLE_COUNT), used_names,
+        )
+    except Exception:
+        return plain_fallback
+    return setup + fire
 
 
 
