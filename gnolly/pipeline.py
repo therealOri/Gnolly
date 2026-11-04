@@ -81,6 +81,7 @@ def protect(
     alias_exprs: bool = True,
     decorrelate_checks: bool = True,
     poison_watchdog: bool = True,
+    poison_deferred_watchers: bool = True,
     ptrace_guard: bool = True,
     ptrace_guard_heartbeat: bool = True,
     ptrace_guard_heartbeat_min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
@@ -142,8 +143,8 @@ def protect(
     alias_exprs     : toggle AST-level expression aliasing -> call results are randomly
                       routed through one or more layer(s) of indirection.
     decorrelate_checks : toggle decorrelated/delayed failure reaction for
-                      the stub's anti-debug, timing, and cosmetic
-                      checks (see gnolly.poison). On by default: a
+                      the stub's anti-debug, timing, cosmetic, and
+                      self-hash checks (see gnolly.poison). On by default: a
                       failed check no longer exit()s at the point it's
                       detected -> it corrupts an accumulator that gets
                       folded into the decryption key hundreds of lines
@@ -159,6 +160,11 @@ def protect(
                       repeating loop as one more indistinguishable
                       branch, rather than a second single-purpose
                       thread.
+    poison_deferred_watchers : default True. Two more independent
+                      readers of the same accumulator: with a second,
+                      independently-timed poll and a gc.callbacks
+                      hook.
+                      Only has an effect when decorrelate_checks is True.
     ptrace_guard    : Linux-only. When True, the protected stub
                       self-attaches via ptrace(PTRACE_TRACEME,...)
                       immediately after it loads and SHA-256-verifies
@@ -302,6 +308,7 @@ def protect(
         module_mode     = module_mode,
         decorrelate_checks = decorrelate_checks,
         poison_watchdog = poison_watchdog,
+        poison_deferred_watchers = poison_deferred_watchers,
         ptrace_guard = ptrace_guard,
         ptrace_guard_heartbeat = ptrace_guard_heartbeat,
         ptrace_guard_heartbeat_min_delay = ptrace_guard_heartbeat_min_delay,
