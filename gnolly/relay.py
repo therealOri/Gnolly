@@ -10,7 +10,7 @@ The caller always supplies the real call as a plain expression string
 -> this module has no idea what the call does and doesn't need;
 it only decides how the call gets reached.
 
-Two families, because callers need different guarantees:
+Three families, because callers need different guarantees:
 
 one_shot_call_lines()
     Returns -> (setup_lines, fire_lines).
@@ -28,10 +28,22 @@ repeatable_call_expr()
     all react the same way) without making a fresh set of
     classes per checkpoint.
 
-Both are keyed off the same rng/reserved_names convention as the rest
-of the obfuscation stack, and both span several distinct protocol
+deferred_reaction_lines()
+    Returns -> (setup_lines, mark_expr).
+    Neither family above changes *when* the call happens -> both still
+    fire at the point something in the normal flow of execution
+    reaches them. This one arms a reaction that fires later, at a
+    point structurally AND temporally decoupled from wherever it got
+    armed: interpreter shutdown, a self-rescheduling background timer,
+    or the interpreter's own next real garbage-collection pass.
+    mark_expr is the cheap, innocuous statement a check site uses to
+    arm it; it produces no visible effect of its own.
+
+All three are keyed off using the same rng/reserved_names convention as the
+rest of the obfuscation stack, and collectively span several distinct
 families (metaclasses, descriptors, context managers, rich
-comparison, attribute/item access, and the copy/pickle hooks) so a reader
+comparison, attribute/item access, the copy/pickle hooks, refcounting
+finalization, and interpreter-shutdown/GC instrumentation) so a reader
 who's worked out one disguise gains nothing against the others.
 """
 from __future__ import annotations
@@ -39,8 +51,9 @@ import random
 from .namegen import random_confusable_name
 from .strcodec import _hidden_str_expr, _hidden_import_attr, _render_int
 
-_ONE_SHOT_STYLE_COUNT = 8
+_ONE_SHOT_STYLE_COUNT = 11
 _REPEATABLE_STYLE_COUNT = 4
+_DEFERRED_STYLE_COUNT = 3
 
 
 def one_shot_call_lines(
@@ -216,7 +229,7 @@ def one_shot_call_lines(
                 f"    pass"]
         return setup, fire
 
-    else:
+    elif style == 7:
         # __reduce__: fires when something copies the instance (e.g.
         # copy.copy(), which falls back to __reduce__ when no
         # __copy__/__deepcopy__ is defined).
@@ -237,6 +250,70 @@ def one_shot_call_lines(
             f"setattr({cls_name}, {reduce_str}, {fn_name})",
         ]
         fire = [f"{tmp_name} = {copy_ref}({cls_name}())"]
+        return setup, fire
+
+    elif style == 8:
+        # weakref callback: CPython's refcounting GC deallocates the
+        # throwaway referent the instant the wrapper function that
+        # created it returns (nothing else references it).
+        cls_name, cb_name, arm_name = (
+            random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
+        )
+        p_ref = random_confusable_name(rng, used, 1)
+        obj_name = random_confusable_name(rng, used, 1)
+        weakref_ref = _hidden_import_attr("weakref", "ref", rng)
+        setup = [
+            f"class {cls_name}:",
+            f"    pass",
+            f"def {cb_name}({p_ref}):",
+            f"    {call_expr}",
+            f"def {arm_name}():",
+            f"    {obj_name} = {cls_name}()",
+            f"    return {weakref_ref}({obj_name}, {cb_name})",
+        ]
+        fire = [f"{arm_name}()"]
+        return setup, fire
+
+    elif style == 9:
+        # __del__ finalizer: is a bare expression statement that has no
+        # assignment and that means the instance's only reference dies the
+        # moment the statement finishes. __del__ fires synchronously
+        # right there and is structurally hidden from the call site.
+        cls_name, fn_name = (
+            random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(2)
+        )
+        p_self = random_confusable_name(rng, used, 1)
+        del_str = _hidden_str_expr("__del__", rng)
+        setup = [
+            f"class {cls_name}:",
+            f"    pass",
+            f"def {fn_name}({p_self}):",
+            f"    {call_expr}",
+            f"setattr({cls_name}, {del_str}, {fn_name})",
+        ]
+        fire = [f"{cls_name}()"]
+        return setup, fire
+
+    else:
+        # weakref.finalize: the API actually meant for this (vs.
+        # __del__/weakref.ref) -> the same prompt-collection shape as
+        # style 8 with a different entry point, and the callback takes no
+        # arguments at all. So there's nothing in the signature that
+        # even hints at what triggered it.
+        cls_name, cb_name, arm_name, obj_name = (
+            random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(4)
+        )
+        weakref_finalize = _hidden_import_attr("weakref", "finalize", rng)
+        setup = [
+            f"class {cls_name}:",
+            f"    pass",
+            f"def {cb_name}():",
+            f"    {call_expr}",
+            f"def {arm_name}():",
+            f"    {obj_name} = {cls_name}()",
+            f"    {weakref_finalize}({obj_name}, {cb_name})",
+        ]
+        fire = [f"{arm_name}()"]
         return setup, fire
 
 
@@ -333,3 +410,105 @@ def repeatable_call_expr(
             f"{inst_name} = {cls_name}()",
         ]
         return setup, f"{copy_ref}({inst_name})"
+
+
+def deferred_reaction_lines(
+    call_expr: str, rng: random.Random, style: int, reserved_names: set,
+    condition_expr: str | None = None,
+) -> tuple[list[str], str | None]:
+    """
+    Arms a reaction that fires later at a point structurally AND
+    temporally decoupled from wherever it gets triggered. Takes advantage of
+    normal interpreter shutdown, a self-rescheduling background timer on an
+    independent thread, or the interpreter's own next real garbage-
+    collection pass.
+
+    If condition_expr is given, it's used as the trigger test directly
+    (for callers that already maintain their own shared signal, e.g.
+    gnolly.poison's accumulator).
+    If omitted, this function creates and owns a private one-element
+    list as its flag; mark_expr is the single statement that arms it,
+    safe to embed inline ("if cond: {mark_expr}") at as many
+    independent check sites as needed.
+
+    Either way, mark_expr/condition_expr never calls call_expr
+    directly and produces no visible effect of its own -> a reader
+    single-stepping the check that fails sees nothing happen. The
+    reaction only surfaces later.
+    """
+    used = reserved_names
+    style = style % _DEFERRED_STYLE_COUNT
+
+    if condition_expr is not None:
+        test_expr = condition_expr
+        flag_setup: list[str] = []
+        mark_expr = None
+    else:
+        flag_name = random_confusable_name(rng, used, length=rng.randint(6, 11))
+        test_expr = f"{flag_name}[0]"
+        flag_setup = [f"{flag_name} = [0]"]
+        mark_expr = f"{flag_name}[0] = 1"
+
+    if style == 0:
+        # atexit.register: fires only at normal interpreter exit ->
+        # catches an attacker who got past every earlier check and had
+        # the program running right up until it would have exited.
+        cb_name = random_confusable_name(rng, used, length=rng.randint(7, 12))
+        atexit_register = _hidden_import_attr("atexit", "register", rng)
+        setup = flag_setup + [
+            f"def {cb_name}():",
+            f"    if {test_expr}:",
+            f"        {call_expr}",
+            f"{atexit_register}({cb_name})",
+        ]
+        return setup, mark_expr
+
+    elif style == 1:
+        # Self-rescheduling background timer: an independent thread
+        # polls the test on a randomized interval for the life of the
+        # process, re-arming itself each time it finds nothing.
+        # This is a different call stack and a different thread with no relationship to
+        # whatever set (or will set) the signal.
+        timer_cls = _hidden_import_attr("threading", "Timer", rng)
+        rand_fn = _hidden_import_attr("random", "uniform", rng)
+        daemon_str = _hidden_str_expr("daemon", rng)
+        start_str = _hidden_str_expr("start", rng)
+        cb_name, delay_fn, sched_fn, tmr_var = (
+            random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(4)
+        )
+        min_d = round(rng.uniform(0.05, 0.3), 3)
+        max_d = round(min_d + rng.uniform(0.2, 1.0), 3)
+        setup = flag_setup + [
+            f"def {delay_fn}():",
+            f"    return {rand_fn}({min_d!r}, {max_d!r})",
+            f"def {sched_fn}():",
+            f"    {tmr_var} = {timer_cls}({delay_fn}(), {cb_name})",
+            f"    setattr({tmr_var}, {daemon_str}, True)",
+            f"    getattr({tmr_var}, {start_str})()",
+            f"def {cb_name}():",
+            f"    if {test_expr}:",
+            f"        {call_expr}",
+            f"    else:",
+            f"        {sched_fn}()",
+            f"{sched_fn}()",
+        ]
+        return setup, mark_expr
+
+    else:
+        # gc.callbacks: appends to CPython's own list of functions the
+        # real garbage collector calls at the start of every
+        # collection pass it runs on its own, driven by ordinary
+        # allocation activity elsewhere in the program.
+        gc_callbacks = _hidden_import_attr("gc", "callbacks", rng)
+        append_str = _hidden_str_expr("append", rng)
+        start_phase_str = _hidden_str_expr("start", rng)
+        cb_name, p_phase, p_info = (
+            random_confusable_name(rng, used, length=rng.randint(6, 11)) for _ in range(3)
+        )
+        setup = flag_setup + [
+            f"def {cb_name}({p_phase}, {p_info}):",
+            f"    if {p_phase} == {start_phase_str} and {test_expr}:",
+            f"        {call_expr}",
+            f"getattr({gc_callbacks}, {append_str})({cb_name})",
+        ]
+        return setup, mark_expr
