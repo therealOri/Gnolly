@@ -88,6 +88,7 @@ def cmd_protect(args):
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
         poison_watchdog     = not args.no_poison_watchdog,
+        poison_deferred_watchers = not args.no_poison_deferred,
         ptrace_guard           = not args.no_ptrace_guard,
         ptrace_guard_heartbeat = args.ptrace_guard_heartbeat,
     )
@@ -139,6 +140,7 @@ def cmd_protect_dir(args):
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
         poison_watchdog     = not args.no_poison_watchdog,
+        poison_deferred_watchers = not args.no_poison_deferred,
         ptrace_guard           = not args.no_ptrace_guard,
         ptrace_guard_heartbeat = args.ptrace_guard_heartbeat,
     )
@@ -197,6 +199,7 @@ def cmd_protect_wheel(args):
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
         poison_watchdog     = not args.no_poison_watchdog,
+        poison_deferred_watchers = not args.no_poison_deferred,
         ptrace_guard           = not args.no_ptrace_guard,
         ptrace_guard_heartbeat = args.ptrace_guard_heartbeat,
     )
@@ -232,7 +235,7 @@ def _add_obf_flags(p):
                    help="Bind to a specific machine fingerprint hex (from 'gnolly fingerprint')")
     p.add_argument("--no-decorrelate", action="store_true", dest="no_decorrelate",
                    help="Disable decorrelated/delayed failure reaction (anti-debug/timing/"
-                        "cosmetic checks exit() immediately at the detection site instead of "
+                        "cosmetic/self-hash checks exit() immediately at the detection site instead of "
                         "folding into the decryption key later; on by default -> see "
                         "gnolly.poison, useful mainly while debugging a protected build)")
     p.add_argument("--no-poison-watchdog", action="store_true", dest="no_poison_watchdog",
@@ -240,6 +243,11 @@ def _add_obf_flags(p):
                         "if any check ever flagged something (folded into the Python heartbeat's "
                         "loop when that's also on). On by default; has no effect with "
                         "--no-decorrelate")
+    p.add_argument("--no-poison-deferred", action="store_true", dest="no_poison_deferred",
+                   help="Disable the two non-thread backup readers of the same poison "
+                        "accumulator (an atexit callback and a gc.callbacks hook) -> unlike "
+                        "the watchdog thread, these can't be found by enumerating running "
+                        "threads. On by default; has no effect with --no-decorrelate")
     p.add_argument("--no-ptrace", action="store_true", dest="no_ptrace_guard",
                    help="Linux-only: disable the ptrace(PTRACE_TRACEME,...) self-attach guard "
                         "that otherwise blocks any debugger (gdb, strace, etc.) from attaching "
