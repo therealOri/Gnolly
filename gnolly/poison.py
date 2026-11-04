@@ -39,8 +39,30 @@ parameter) uses mechanism 1 unconditionally; mechanism 2 is optional/additional 
    aggressive default than the key fold alone, which already removes
    every exit() call a static read of the stub could find.
 
-Both mechanisms consume the same accumulator, so neither reveals, on
-its own, how many checks exist, which one tripped, or when.
+   generate_poison_deferred_watch_lines adds further independent
+   readers of this same accumulator on top of the watchdog thread. The
+   fold above already corrupts the key the instant it runs, so none of
+   this is actually about exposure timing for the code -> it's
+   about how long an attacker gets to study the REST of the protection
+   machinery live, in the narrow case they reproduced a correct key
+   despite tampering.
+   Defaults to a second independently-timed poll and a hook into gc.callbacks.
+   (fires on the interpreter's own next garbage-collection pass -> both fire on a bounded or
+   activity-driven schedule. An atexit-based reader is available too
+   (fires only at normal interpreter shutdown) but isn't the default
+   here, since on a long-running process that's an unbounded amount of
+   live time; we pass it explicitly where "catch it eventually, however
+   long that takes" is actually the goal.
+
+Mechanism 2's own readers also don't need a thread at all to be
+delayed/decorrelated in the first place -> see relay.one_shot_call_lines'
+weakref/__del__/weakref.finalize styles, which decouple a single
+reaction from its call site via CPython's refcounting GC rather than
+a background thread or the accumulator.
+
+All of mechanism 2's readers consume the same accumulator, so none of
+them, on their own, reveal how many checks exist, which one tripped,
+or when.
 """
 from __future__ import annotations
 import hashlib
@@ -49,7 +71,7 @@ import random
 import secrets
 from .namegen import random_confusable_name
 from .strcodec import _enc_str, _enc_bytes_as_str
-from .relay import one_shot_call_lines, _ONE_SHOT_STYLE_COUNT
+from .relay import one_shot_call_lines, _ONE_SHOT_STYLE_COUNT, deferred_reaction_lines
 
 # Domain separation from binding.py's _BIND_DOMAIN and integrity.py's
 # _INTEGRITY_DOMAIN -> all three folds must never be confusable with
@@ -165,8 +187,8 @@ def generate_poison_watch_lines(
     )
 
     # The kill itself (os._exit) of this watcher looks like a payload.
-    # We will route it through the same relay disguises we use elsewhere. 
-    # Setup runs before the timer callback is even defined and the fire statement is the only thing that 
+    # We will route it through the same relay disguises we use elsewhere.
+    # Setup runs before the timer callback is even defined and the fire statement is the only thing that
     # actually runs inside the callback body.
     kill_setup, kill_fire = one_shot_call_lines(
         f"getattr({h_os}, {s('_exit')})({obn(1)})",
@@ -184,5 +206,38 @@ def generate_poison_watch_lines(
     a(f"{v_thr} = getattr({imp_fn}({s('threading')}), {s('Timer')})({v_delay}, {v_fn})")
     a(f"setattr({v_thr}, {s('daemon')}, True)")
     a(f"getattr({v_thr}, {s('start')})()")
+
+    return lines
+
+
+def generate_poison_deferred_watch_lines(
+    poison_var: str, s_fn: str, h_os: str, str_key: bytes, obn,
+    styles: tuple[int, ...] = (1, 2),
+) -> list[str]:
+    """
+    Additional, independent readers of the SAME accumulator mechanism
+    1/mechanism 2 above already use. These are not a new signal, just more
+    ways of eventually noticing the existing one.
+    """
+    lines = []
+    a = lines.append
+
+    def enc(s: str) -> str:
+        return _enc_str(s, str_key)
+
+    def s(text: str) -> str:
+        return f"{s_fn}({enc(text)})"
+
+    rng = random.Random(secrets.randbits(64))
+    used: set = set()
+    condition = f"{poison_var} & {obn(_POISON_MASK)}"
+
+    for style in styles:
+        kill_setup, _mark = deferred_reaction_lines(
+            f"getattr({h_os}, {s('_exit')})({obn(1)})",
+            rng, style, used, condition_expr=condition,
+        )
+        for line in kill_setup:
+            a(line)
 
     return lines
