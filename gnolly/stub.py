@@ -44,7 +44,8 @@ from .selfhash import wrap_with_self_hash
 from .modhide import generate_hidden_decode_import
 from .poison import (
     generate_poison_init_lines, generate_poison_fold_lines,
-    generate_poison_watch_lines, poison_mark_expr,
+    generate_poison_watch_lines, generate_poison_deferred_watch_lines,
+    poison_mark_expr,
 )
 from .strcodec import (
     _obf_int_lambda, _split_int_list_expr,
@@ -139,6 +140,7 @@ def generate_stub(
     module_mode: bool = False,
     decorrelate_checks: bool = True,
     poison_watchdog: bool = True,
+    poison_deferred_watchers: bool = True,
     ptrace_guard: bool = True,
     ptrace_guard_heartbeat: bool = True,
     ptrace_guard_heartbeat_min_delay: float = DEFAULT_HEARTBEAT_MIN_DELAY,
@@ -153,7 +155,7 @@ def generate_stub(
         This makes the stub behave like a normal importable module.
         Used by gnolly.package / gnolly.wheel for package and wheel protection.
     decorrelate_checks : when True (default), anti-debug/timing/cosmetic
-        checks no longer call exit() at the point they detect a problem
+        AND self-hash checks no longer call exit() at the point they detect a problem
         -> see gnolly.poison. Instead they corrupt an in-memory
         accumulator that gets folded into the decryption key hundreds
         of lines later, right alongside the existing integrity fold.
@@ -172,6 +174,17 @@ def generate_stub(
         folded directly into that thread's already-repeating loop
         instead of spawning gnolly.poison.generate_poison_watch_lines'
         own separate, single-purpose thread.
+    poison_deferred_watchers : default True. Two more independent
+        readers of the same poison accumulator: a second,
+        independently-timed self-rescheduling poll, and a gc.callbacks
+        hook.
+        The fold above already corrupts the decryption key the moment
+        it runs, so none of this is actually about payload exposure
+        timing -> it's a backstop for the narrower case of an attacker
+        reproducing a correct key despite tampering, where it's about
+        how long they get to study the rest of the protection
+        machinery live rather than about the payload. Has no
+        effect when decorrelate_checks is False.
     ptrace_guard : Linux-only. When True, the stub self-attaches via
         ptrace(PTRACE_TRACEME,...) immediately after it loads and
         SHA-256-verifies gnolly/_gnolly_core.so. A self-attach failure
@@ -315,6 +328,10 @@ def generate_stub(
             for _pwl in generate_poison_watch_lines(
                     poison_var, s_fn, h_os, str_key, obn, imp_fn=imp_fn):
                 a(_pwl)
+        if poison_deferred_watchers:
+            for _pdl in generate_poison_deferred_watch_lines(
+                    poison_var, s_fn, h_os, str_key, obn):
+                a(_pdl)
         a("")
 
     # ── Payload blob chunks ───────────────────────────────────────────────────
@@ -634,5 +651,6 @@ def generate_stub(
     # all the way through.
     if self_hash:
         result = wrap_with_self_hash(result, src_var=N[150], reserved_names=set(N),
-                                      encode_chunks=not will_be_packed)
+                                      encode_chunks=not will_be_packed,
+                                      poison_var=poison_var, obn=obn)
     return result
