@@ -58,6 +58,7 @@ import zlib
 
 from .strcodec import _hidden_import_call, _hidden_str_expr, random_confusable_name, _hidden_exec_ref
 from .minify import minify_source
+from .relay import one_shot_call_lines
 
 _ALGOS = {
     "zlib": lambda b: zlib.compress(b, 9),
@@ -151,10 +152,30 @@ def pack_source(source: str) -> str:
         utf8_attr = _hidden_str_expr("utf-8", rng)
         payload = f"getattr({inflated}, {decode_attr})({utf8_attr})"
 
+    # Relay's 11 styles range from ~450 bytes to over 9KB depending which one gets
+    # picked, for a line that (with this module's own existing hidden-
+    # import machinery) was already costing ~1KB undisguised. The
+    # expensive third of the styles need multiple hidden-string
+    # literals (__init_subclass__, __class_getitem__, __reduce__) or
+    # a whole extra module import (weakref). And those aren't really worth it
+    # here, where the entire point of this module is minimizing size.
+    # So we will restrict our choices to the ~6 cheapest styles. Still having
+    # variety, without undermining this module's actual job.
+    _PACK_SAFE_STYLES = (0, 1, 3, 4, 6, 9)
+    exec_ref = _hidden_exec_ref(rng)
+    try:
+        exec_setup, exec_fire = one_shot_call_lines(
+            f"({exec_ref})({payload}, globals())",
+            rng, rng.choice(_PACK_SAFE_STYLES), used,
+        )
+    except Exception:
+        exec_setup, exec_fire = [], [f"({exec_ref})({payload}, globals())"]
+
     lines = [
         f"{blob_var} = {b85_text!r}",
         f"{imp_var} = {_hidden_import_call(rng)}",
-        f"({_hidden_exec_ref(rng)})({payload}, globals())",
+        *exec_setup,
+        *exec_fire,
     ]
     result = "\n".join(lines)
 
