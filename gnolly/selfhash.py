@@ -14,6 +14,7 @@ from .relay import (
     one_shot_call_lines, repeatable_call_expr,
     _ONE_SHOT_STYLE_COUNT, _REPEATABLE_STYLE_COUNT,
 )
+from .poison import poison_mark_expr
 
 # 64 literal ASCII '0' chars -> exactly a sha256 hexdigest's width. This
 # exact run must appear in the body text ONLY where check blocks put it;
@@ -45,7 +46,10 @@ def _encode_chunk(text: str, rng: random.Random, b85_var: str, u8_var: str, dec_
     return f"getattr(bytes({bv} ^ {key} for {bv} in {b85_var}({literal!r})), {dec_var})({u8_var})"
 
 
-def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]:
+def _one_check_block(
+    src_var: str, style: int, reserved_names: set,
+    poison_var: str | None = None, obn=None,
+) -> list[str]:
     """
     One self-contained self-hash check.
 
@@ -55,6 +59,12 @@ def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]
     strcodec's standalone helpers (_hidden_str_expr, _hidden_import_attr),
     which build a complete, dependency-free expression each time
     rather than assuming a decoder is already defined.
+
+    poison_var/obn : when poison_var is given (see gnolly.poison),
+    a failed check marks the accumulator instead of reacting here at
+    all -> same decorrelated-reaction choice antidebug.py's checks
+    already make, now extended to self-hash. obn must be given
+    alongside poison_var.
     """
     rng = random.Random(secrets.randbits(64))
     used = reserved_names
@@ -81,15 +91,19 @@ def _one_check_block(src_var: str, style: int, reserved_names: set) -> list[str]
     hexdigest_str = _hidden_str_expr("hexdigest", rng)
     a(f"{v_re} = getattr({hash_ref}(getattr({v_can}, {encode_str})({utf8_lit})), {hexdigest_str})()")
 
-    # The reaction itself (os._exit(1)) is the one part of this block
-    # that looks like a payload rather than bookkeeping -> route it
-    # through the same relay disguises used elsewhere instead of a
-    # bare NAME(1) call.
-    exit_setup, exit_expr = repeatable_call_expr(
-        f"{exit_ref}(1)", rng, rng.randrange(_REPEATABLE_STYLE_COUNT), used,
-    )
-    lines.extend(exit_setup)
+    if poison_var is not None and obn is not None:
+        exit_expr = poison_mark_expr(poison_var, obn)
+    else:
+        exit_setup, exit_expr = repeatable_call_expr(
+            f"{exit_ref}(1)", rng, rng.randrange(_REPEATABLE_STYLE_COUNT), used,
+        )
+        lines.extend(exit_setup)
 
+    # poison_mark_expr returns an assignment STATEMENT, not an
+    # expression -> it can't legally sit inside the ternary shape
+    # below, so the decorrelated path only ever picks between the two
+    # statement-shaped guards.
+    style = style % (2 if poison_var is not None else 3)
     if style == 0:
         a(f"if {v_re} != {v_exp}: {exit_expr}")
     elif style == 1:
@@ -151,10 +165,16 @@ def _positional_patch(text: str, offset: int, new_value: str) -> str:
     return text[:offset] + new_value + text[offset + len(new_value):]
 
 
-def _one_ring_block(src_var: str, style: int, reserved_names: set) -> dict:
+def _one_ring_block(
+    src_var: str, style: int, reserved_names: set,
+    poison_var: str | None = None, obn=None,
+) -> dict:
     """
     One ring-check block, with all six dynamic fields still zeroed.
     Returns {"text": ..., "offsets": {field: local_char_offset, ...}}
+
+    poison_var/obn : see _one_check_block -> same decorrelated-reaction
+    opt-in, applied here too.
     """
     rng = random.Random(secrets.randbits(64))
     used = reserved_names
@@ -200,13 +220,18 @@ def _one_ring_block(src_var: str, style: int, reserved_names: set) -> dict:
         f"+ {v_canon}[int({v_rel_end}) + {_RING_OFFSET_WIDTH}:]")
     add(f"{v_actual} = getattr({hash_ref}(getattr({v_canon}, {encode_str})({utf8_lit})), {hexdigest_str})()")
 
-    exit_setup, exit_expr = repeatable_call_expr(
-        f"{exit_ref}(1)", rng, rng.randrange(_REPEATABLE_STYLE_COUNT), used,
-    )
-    for line in exit_setup:
-        add(line)
+    if poison_var is not None and obn is not None:
+        exit_expr = poison_mark_expr(poison_var, obn)
+    else:
+        exit_setup, exit_expr = repeatable_call_expr(
+            f"{exit_ref}(1)", rng, rng.randrange(_REPEATABLE_STYLE_COUNT), used,
+        )
+        for line in exit_setup:
+            add(line)
 
-    style = style % 3
+    # Same reasoning as _one_check_block: poison_mark_expr's output is
+    # an assignment statement.
+    style = style % (2 if poison_var is not None else 3)
     if style == 0:
         add(f"if {v_actual} != {v_exp}: {exit_expr}")
     elif style == 1:
@@ -219,17 +244,23 @@ def _one_ring_block(src_var: str, style: int, reserved_names: set) -> dict:
     return {"text": "\n".join(lines), "offsets": offsets}
 
 
-def build_ring_checks(src_var: str, n_checks: int, reserved_names: set) -> str | None:
+def build_ring_checks(
+    src_var: str, n_checks: int, reserved_names: set,
+    poison_var: str | None = None, obn=None,
+) -> str | None:
     """
     Build n_checks ring-wired self-hash blocks.
     Returns None -> caller treats this the same as any other
     "don't wrap" signal -> if n_checks can't form a ring (<2) or
     anything about the generated layout fails to round-trip.
+
+    poison_var/obn : see _one_check_block -> forwarded to every block.
     """
     if n_checks < 2:
         return None
     try:
-        blocks = [_one_ring_block(src_var, i % 3, reserved_names) for i in range(n_checks)]
+        blocks = [_one_ring_block(src_var, i % 3, reserved_names, poison_var=poison_var, obn=obn)
+                  for i in range(n_checks)]
         texts = [b["text"] for b in blocks]
 
         starts: list[int] = []
@@ -443,6 +474,7 @@ def _build_wrapper(final_body: str, src_var: str, reserved_names: set, encode_ch
 def wrap_with_self_hash(
     body_text: str, src_var: str, n_checks: int = 4, reserved_names: set | None = None,
     encode_chunks: bool = True, ring: bool = True,
+    poison_var: str | None = None, obn=None,
 ) -> str:
     """
     Prepend n_checks self-hash check blocks to body_text, then wrap the
@@ -462,18 +494,26 @@ def wrap_with_self_hash(
     knows pack_source() will compress this result afterward -> the
     default of True is the safe choice for direct/standalone callers
     who might ship this text as-is.
+
+    poison_var/obn : when given (see gnolly.poison), a failed check
+    marks the shared accumulator instead of reacting here,
+    matching antidebug.py's own decorrelated-reaction opt-in. Both
+    must already be defined and in scope wherever the returned text
+    ends up running.
     """
     reserved_names = set(reserved_names) if reserved_names else set()
     try:
         if ring and n_checks >= 2:
-            checks_text = build_ring_checks(src_var, n_checks, reserved_names)
+            checks_text = build_ring_checks(src_var, n_checks, reserved_names,
+                                             poison_var=poison_var, obn=obn)
             if checks_text is None:
                 return body_text
             final_body = checks_text + "\n" + body_text
         else:
             checks: list[str] = []
             for i in range(n_checks):
-                checks.extend(_one_check_block(src_var, style=i % 3, reserved_names=reserved_names))
+                checks.extend(_one_check_block(src_var, style=i % 3, reserved_names=reserved_names,
+                                                poison_var=poison_var, obn=obn))
 
             pre_sub = "\n".join(checks) + "\n" + body_text
 
