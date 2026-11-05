@@ -84,6 +84,7 @@ def cmd_protect(args):
         flatten             = not args.no_flatten,
         minify              = not args.no_minify,
         pack                = not args.no_pack,
+        one_line_output     = not args.no_one_line_output,
         bogus_hierarchy     = not args.no_hierarchy,
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
@@ -136,6 +137,7 @@ def cmd_protect_dir(args):
         flatten             = not args.no_flatten,
         minify              = not args.no_minify,
         pack                = not args.no_pack,
+        one_line_output     = not args.no_one_line_output,
         bogus_hierarchy     = not args.no_hierarchy,
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
@@ -195,6 +197,7 @@ def cmd_protect_wheel(args):
         flatten             = not args.no_flatten,
         minify              = not args.no_minify,
         pack                = not args.no_pack,
+        one_line_output     = not args.no_one_line_output,
         bogus_hierarchy     = not args.no_hierarchy,
         alias_exprs         = not args.no_alias,
         decorrelate_checks  = not args.no_decorrelate,
@@ -229,6 +232,12 @@ def _add_obf_flags(p):
                    help="Disable minification of the protected output (on by default)")
     p.add_argument("--no-pack", action="store_true",
                    help="Disable final compression pass (bootstrap + compressed blob, on by default)")
+    p.add_argument("--no-one-line", action="store_true", dest="no_one_line_output",
+                   help="Disable wrapping the (already disguised) packed bootstrap in one more "
+                        "blob behind a second, deliberately plain bootstrap -> on by default, "
+                        "this is what collapses the shipped file's visible top level to a true "
+                        "single line. Has no effect with --no-pack. A size-for-shape trade, not "
+                        "a size optimization -> can make the file a little bigger, not smaller.")
     p.add_argument("--bind",       action="store_true",
                    help="Bind output to THIS machine (uses current machine fingerprint)")
     p.add_argument("--bind-fp",    default=None, dest="bind_fp",
