@@ -46,6 +46,13 @@ One hidden __import__ reference, not several
 
 The bootstrap this module generates is minified before being returned,
 the same as everything else in the pipeline.
+
+pack_to_one_line() is a separate final layer: pack_source()'s
+own bootstrap is partly disguised via gnolly.relay.
+pack_to_one_line() wraps pack_source()'s entire output in one more blob behind a second, deliberately
+PLAIN bootstrap, so the file's visible top level is a true single
+line while everything underneath stays exactly as disguised as it
+already was.
 """
 from __future__ import annotations
 import base64
@@ -204,6 +211,88 @@ def pack_source(source: str) -> str:
             if restored.decode("utf-8") != source:
                 return source
         compile(result, "<pack_check>", "exec")
+    except Exception:
+        return source
+
+    return result
+
+
+def pack_to_one_line(source: str) -> str:
+    """
+    Wrap "source" -> typically pack_source()'s own output, disguised
+    bootstrap and all -> in one more layer: a compressed blob plus a
+    deliberately PLAIN, undisguised 3-statement bootstrap (a blob
+    assignment, an import-reference assignment, one exec call). All
+    three are simple statements, so minify_source's semicolon-joiner
+    (see gnolly.minify._join_simple_runs/_is_simple) collapses them
+    onto a single physical line.
+    """
+    best = _best_candidate(source)
+    if best is None:
+        mode, algo_name, blob = "source", None, source.encode("utf-8")
+    else:
+        mode, algo_name, blob = best
+
+    rng = random.Random(secrets.randbits(64))
+    used: set = set()
+    blob_var = random_confusable_name(rng, used, length=rng.randint(9, 14))
+    imp_var = random_confusable_name(rng, used, length=rng.randint(9, 14))
+
+    b85_text = base64.b85encode(blob).decode("ascii")
+    b85mod_str = _hidden_str_expr("base64", rng)
+    b85attr_str = _hidden_str_expr("b85decode", rng)
+    b85_decode_call = f"getattr({imp_var}({b85mod_str}), {b85attr_str})"
+
+    if algo_name is None:
+        inflated = f"{b85_decode_call}({blob_var})"
+    else:
+        decompress_ref = _decompress_reference(algo_name, rng, imp_var)
+        inflated = f"{decompress_ref}({b85_decode_call}({blob_var}))"
+
+    if mode == "bytecode":
+        marshal_str = _hidden_str_expr("marshal", rng)
+        loads_str = _hidden_str_expr("loads", rng)
+        loads_call = f"getattr({imp_var}({marshal_str}), {loads_str})"
+        payload = f"{loads_call}({inflated})"
+    else:
+        decode_attr = _hidden_str_expr("decode", rng)
+        utf8_attr = _hidden_str_expr("utf-8", rng)
+        payload = f"getattr({inflated}, {decode_attr})({utf8_attr})"
+
+    # Deliberately NOT routed through relay -> a disguised exec here
+    # would reintroduce the exact class/def block structure that
+    # breaks the one-line collapse this function exists to make happen.
+    exec_ref = _hidden_exec_ref(rng)
+    lines = [
+        f"{blob_var} = {b85_text!r}",
+        f"{imp_var} = {_hidden_import_call(rng)}",
+        f"({exec_ref})({payload}, globals())",
+    ]
+    result = "\n".join(lines)
+
+    try:
+        result = minify_source(result)
+    except Exception:
+        pass
+
+    try:
+        restored_blob = base64.b85decode(b85_text)
+        if restored_blob != blob:
+            return source
+        if algo_name is not None:
+            if algo_name in _CODEC_REGISTERED:
+                import codecs
+                restored = codecs.decode(restored_blob, algo_name)
+            else:
+                restored = {"lzma": lzma.decompress}[algo_name](restored_blob)
+        else:
+            restored = restored_blob
+        if mode == "bytecode":
+            marshal.loads(restored)  # confirm it unmarshals
+        else:
+            if restored.decode("utf-8") != source:
+                return source
+        compile(result, "<pack_one_line_check>", "exec")
     except Exception:
         return source
 
