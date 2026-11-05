@@ -36,7 +36,7 @@ from .crypto      import encrypt, _MAGIC, _VERSION, _SALT_LEN, _IV_LEN, _TAG_LEN
 from .encoding    import GnollyCodec
 from .stub        import generate_stub
 from .minify      import minify_source
-from .pack        import pack_source
+from .pack        import pack_source, pack_to_one_line
 from .build_core  import ensure_core
 from .binding     import collect_fingerprint, fingerprint_from_hex
 from .integrity   import collect_runtime_hashes, fold_integrity
@@ -75,6 +75,7 @@ def protect(
     flatten: bool = True,
     minify: bool = True,
     pack: bool = True,
+    one_line_output: bool = True,
     self_hash: bool = True,
     module_mode: bool = False,
     bogus_hierarchy: bool = True,
@@ -118,6 +119,15 @@ def protect(
                       On by default; disable via --no-pack on the CLI
                       if you want the readable (flattened/minified)
                       stub as the shipped output instead.
+    one_line_output : wrap pack's already-disguised bootstrap in one
+                      more opaque blob behind a second, deliberately
+                      undisguised bootstrap (see
+                      gnolly.pack.pack_to_one_line), so the shipped
+                      file's visible top level collapses to a true
+                      single physical line.
+                      On by default; disable via --no-one-line on the
+                      CLI if you'd rather see pack's own bootstrap
+                      directly.
     self_hash       : toggle self-hash verification of the stub's own
                       source text (see gnolly.selfhash). Several
                       independent checks, run at startup, detect any
@@ -323,6 +333,9 @@ def protect(
     if pack:
         _log("Packing stub …")
         stub_source = pack_source(stub_source)
+        if one_line_output:
+            _log("Collapsing to a single line …")
+            stub_source = pack_to_one_line(stub_source)
     return stub_source
 
 
