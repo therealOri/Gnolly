@@ -74,7 +74,7 @@ def one_shot_call_lines(
         meta_name, cls_name, fn_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
-        p_mcs, p_name, p_bases, p_ns = (random_confusable_name(rng, used, 1) for _ in range(4))
+        p_mcs, p_name, p_bases, p_ns = (random_confusable_name(rng, used, length=rng.randint(4, 6)) for _ in range(4))
         new_str = _hidden_str_expr("__new__", rng)
         setup = [
             f"class {meta_name}(type):",
@@ -97,7 +97,7 @@ def one_shot_call_lines(
         desc_name, cls_name, attr_name, fn_name = (
             random_confusable_name(rng, used, length=rng.randint(6, 12)) for _ in range(4)
         )
-        p_self, p_owner, p_ownname = (random_confusable_name(rng, used, 1) for _ in range(3))
+        p_self, p_owner, p_ownname = (random_confusable_name(rng, used, length=rng.randint(4, 6)) for _ in range(3))
         set_name_str = _hidden_str_expr("__set_name__", rng)
         setup = [
             f"class {desc_name}:",
@@ -118,7 +118,7 @@ def one_shot_call_lines(
         base_name, sub_name, fn_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
-        p_cls, p_kw = (random_confusable_name(rng, used, 1) for _ in range(2))
+        p_cls, p_kw = (random_confusable_name(rng, used, length=rng.randint(4, 6)) for _ in range(2))
         init_sub_str = _hidden_str_expr("__init_subclass__", rng)
         classmethod_ref = _hidden_import_attr("builtins", "classmethod", rng)
         setup = [
@@ -142,7 +142,7 @@ def one_shot_call_lines(
         meta_name, cls_name, fn_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
-        p_mcs, p_args, p_kwargs = (random_confusable_name(rng, used, 1) for _ in range(3))
+        p_mcs, p_args, p_kwargs = (random_confusable_name(rng, used, length=rng.randint(4, 6)) for _ in range(3))
         call_str = _hidden_str_expr("__call__", rng)
         setup = [
             f"class {meta_name}(type):",
@@ -162,7 +162,7 @@ def one_shot_call_lines(
         ctx_name, enter_fn, exit_fn = (
             random_confusable_name(rng, used, length=rng.randint(6, 12)) for _ in range(3)
         )
-        p_self, p_exc = (random_confusable_name(rng, used, 1) for _ in range(2))
+        p_self, p_exc = (random_confusable_name(rng, used, length=rng.randint(4, 6)) for _ in range(2))
         enter_str = _hidden_str_expr("__enter__", rng)
         exit_str = _hidden_str_expr("__exit__", rng)
         setup = [
@@ -189,7 +189,7 @@ def one_shot_call_lines(
         cls_name, fn_name, tmp_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
-        p_cls, p_item = (random_confusable_name(rng, used, 1) for _ in range(2))
+        p_cls, p_item = (random_confusable_name(rng, used, length=rng.randint(4, 6)) for _ in range(2))
         cgi_str = _hidden_str_expr("__class_getitem__", rng)
         classmethod_ref = _hidden_import_attr("builtins", "classmethod", rng)
         setup = [
@@ -212,7 +212,7 @@ def one_shot_call_lines(
         sent_name, fn_name, inst_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
-        p_self, p_other = (random_confusable_name(rng, used, 1) for _ in range(2))
+        p_self, p_other = (random_confusable_name(rng, used, length=rng.randint(4, 6)) for _ in range(2))
         eq_str = _hidden_str_expr("__eq__", rng)
         decoy_len = rng.randint(2, 97)
         decoy_lit = _render_int(decoy_len, rng)
@@ -236,7 +236,7 @@ def one_shot_call_lines(
         cls_name, fn_name, tmp_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
-        p_self = random_confusable_name(rng, used, 1)
+        p_self = random_confusable_name(rng, used, length=rng.randint(4, 6))
         reduce_str = _hidden_str_expr("__reduce__", rng)
         str_ref = _hidden_import_attr("builtins", "str", rng)
         copy_ref = _hidden_import_attr("copy", "copy", rng)
@@ -259,8 +259,8 @@ def one_shot_call_lines(
         cls_name, cb_name, arm_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
-        p_ref = random_confusable_name(rng, used, 1)
-        obj_name = random_confusable_name(rng, used, 1)
+        p_ref = random_confusable_name(rng, used, length=rng.randint(4, 6))
+        obj_name = random_confusable_name(rng, used, length=rng.randint(4, 6))
         weakref_ref = _hidden_import_attr("weakref", "ref", rng)
         setup = [
             f"class {cls_name}:",
@@ -282,7 +282,7 @@ def one_shot_call_lines(
         cls_name, fn_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(2)
         )
-        p_self = random_confusable_name(rng, used, 1)
+        p_self = random_confusable_name(rng, used, length=rng.randint(4, 6))
         del_str = _hidden_str_expr("__del__", rng)
         setup = [
             f"class {cls_name}:",
@@ -337,7 +337,7 @@ def repeatable_call_expr(
         meta_name, cls_name, fn_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
-        p_mcs, p_args, p_kwargs = (random_confusable_name(rng, used, 1) for _ in range(3))
+        p_mcs, p_args, p_kwargs = (random_confusable_name(rng, used, length=rng.randint(4, 6)) for _ in range(3))
         call_str = _hidden_str_expr("__call__", rng)
         setup = [
             f"class {meta_name}(type):",
@@ -358,7 +358,7 @@ def repeatable_call_expr(
         cls_name, fn_name, inst_name, attr_name = (
             random_confusable_name(rng, used, length=rng.randint(6, 12)) for _ in range(4)
         )
-        p_self, p_name = (random_confusable_name(rng, used, 1) for _ in range(2))
+        p_self, p_name = (random_confusable_name(rng, used, length=rng.randint(4, 6)) for _ in range(2))
         getattr_str = _hidden_str_expr("__getattr__", rng)
         setup = [
             f"class {cls_name}:",
@@ -376,7 +376,7 @@ def repeatable_call_expr(
         cls_name, fn_name, inst_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
-        p_self, p_item = (random_confusable_name(rng, used, 1) for _ in range(2))
+        p_self, p_item = (random_confusable_name(rng, used, length=rng.randint(4, 6)) for _ in range(2))
         getitem_str = _hidden_str_expr("__getitem__", rng)
         idx_lit = _render_int(rng.randint(0, 255), rng)
         setup = [
@@ -395,7 +395,7 @@ def repeatable_call_expr(
         cls_name, fn_name, inst_name = (
             random_confusable_name(rng, used, length=rng.randint(7, 12)) for _ in range(3)
         )
-        p_self = random_confusable_name(rng, used, 1)
+        p_self = random_confusable_name(rng, used, length=rng.randint(4, 6))
         reduce_str = _hidden_str_expr("__reduce__", rng)
         str_ref = _hidden_import_attr("builtins", "str", rng)
         copy_ref = _hidden_import_attr("copy", "copy", rng)
