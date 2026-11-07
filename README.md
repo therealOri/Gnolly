@@ -232,10 +232,14 @@ gnolly protect <input.py> [output.py] [options]
   --no-alias              Skip AST-level expression aliasing
   --no-minify             Skip stub minification
   --no-pack               Skip the final compression pass (ship the readable stub instead)
+  --no-one-line           Skip wrapping the packed bootstrap in one more blob so the shipped file is a single line
   --bind                  Bind output to THIS machine (uses current fingerprint)
   --bind-fp HEX           Bind to a specific machine fingerprint (from 'gnolly fingerprint')
-  --ptrace                Linux-only: self-attach via ptrace so no debugger should be able to attach. Opt-in.
-  --ptrace-no-heartbeat   Disable the default re-verification heartbeat. No effect without --ptrace
+  --no-decorrelate        Skip decorrelated/delayed failure reaction (checks exit() immediately at the detection site instead)
+  --no-poison-watchdog    Skip the daemon-thread backup reaction that kills the process if any check ever flagged something
+  --no-poison-deferred    Skip the two non-thread backup readers (an atexit callback and a gc.callbacks hook) of the same signal
+  --no-ptrace             Linux-only: disable the ptrace self-attach guard that blocks debuggers from attaching. On by default.
+  --ptrace-no-heartbeat   Disable the ptrace self-attach re-verification heartbeat. No effect if the ptrace guard is off
   -v, --verbose           Show pipeline progress
   --verbose-errors        Emit error messages from the stub on failure (dev only)
 ```
@@ -338,16 +342,21 @@ protect(
     flatten: bool = True,
     minify: bool = True,
     pack: bool = True,
+    one_line_output: bool = True,
     self_hash: bool = True,
     module_mode: bool = False,
     bogus_hierarchy: bool = True,
     alias_exprs: bool = True,
     decorrelate_checks: bool = True,
-    poison_watchdog: bool = False,
-    ptrace_guard: bool = False,
+    poison_watchdog: bool = True,
+    poison_deferred_watchers: bool = True,
+    ptrace_guard: bool = True,
     ptrace_guard_heartbeat: bool = True,
     ptrace_guard_heartbeat_min_delay: float = 0.0005,
     ptrace_guard_heartbeat_max_delay: float = 0.002,
+    python_heartbeat: bool = True,
+    python_heartbeat_min_delay: float = 0.4,
+    python_heartbeat_max_delay: float = 1.0,
 ) -> str
 ```
 > Every call to `protect()` (and every underlying obfuscation/encoding step) is fully non-deterministic by design. There is no seed, fixed or otherwise, anywhere in the pipeline, internal or CLI-exposed. Two calls with identical `source`/`password` should produce different output.
@@ -405,17 +414,18 @@ This composes with the `.so` integrity binding described [above](#versioning-the
 | Expression aliasing | Call results are randomly routed through one of several indirection shapes (lambda wrapper, dict/tuple lookup, conditional expression, fake-class alias) before use, so the same call doesn't always look the same. |
 | Multi-dialect string/number encoding | String, bytes, and float literals are rendered via one of several independently-applicable encoding dialects, re-rolled per literal; integers are rendered via one of several exact arithmetic identities (XOR, additive, mul-div, bit-shift), also re-rolled per literal. A decoder written against one instance won't match the next. See `gnolly/strcodec.py` and `gnolly/obfuscate.py`. |
 | Decoy-structure injection | Dead code is injected in multiple structurally distinct shapes (unreachable branches, unused bindings, dead lambdas, never-iterated loops, raise/catch pairs) rather than one repeated pattern, so the decoys themselves don't become a fingerprint. |
-| Minification + packing | The flattened stub is minified (`gnolly/minify.py`) and the final output is replaced with a tiny bootstrap plus one opaque compressed blob (`gnolly/pack.py`), collapsing the visible, readable surface of the shipped file. |
+| Minification + packing | The flattened stub is minified (`gnolly/minify.py`) and the final output is replaced with a tiny bootstrap plus one opaque compressed blob (`gnolly/pack.py`), collapsing the visible, readable surface of the shipped file. On by default, that bootstrap is itself wrapped in one more blob behind a second, plain bootstrap so the shipped file collapses to a single line (`one_line_output`). |
 | Importable package / wheel protection | `gnolly protect-dir` and `gnolly protect-wheel` protect an entire package recursively and can emit a real, installable `.whl`; protected modules execute into their own module `__dict__` via `module_mode`, so normal `import` semantics keep working. |
 | Import-hook-based hiding | Select internal helper logic is hidden behind a synthetic `sys.meta_path` Finder/Loader instead of an inline `exec()`'d blob, so it looks like an ordinary import rather than code being unpacked and run at the call site. See `gnolly/modhide.py`. |
 
-### Ptrace self-attach (`--ptrace`)
+### Ptrace self-attach (`--no-ptrace`)
 
-Linux only, off by default. A process can call `ptrace(PTRACE_TRACEME, 0, NULL, NULL)` on itself; the kernel then records its real parent as the tracer, and Linux allows only one tracer per process. Once that succeeds, a later `PTRACE_ATTACH`/`PTRACE_SEIZE` from a debugger (gdb, `strace -p`, etc.) against that PID fails outright with `EPERM` -> the debugger never gets to attach at all, rather than attaching and being caught after the fact. `/proc/<pid>/mem` reads from another process that goes through the same kernel check, so those are blocked too.
+Linux only, on by default. A process can call `ptrace(PTRACE_TRACEME, 0, NULL, NULL)` on itself; the kernel then records its real parent as the tracer, and Linux allows only one tracer per process. Once that succeeds, a later `PTRACE_ATTACH`/`PTRACE_SEIZE` from a debugger (gdb, `strace -p`, etc.) against that PID fails outright with `EPERM` -> the debugger never gets to attach at all, rather than attaching and being caught after the fact. `/proc/<pid>/mem` reads from another process that goes through the same kernel check, so those are blocked too.
 
 ```bash
-gnolly protect app.py --ptrace                  # self-attach, strict + heartbeat, both on by default
-gnolly protect app.py --ptrace --ptrace-no-heartbeat  # self-attach only, skip re-verifications
+gnolly protect app.py                                 # self-attach, strict + heartbeat, both on by default
+gnolly protect app.py --ptrace-no-heartbeat            # self-attach only, skip re-verifications
+gnolly protect app.py --no-ptrace                      # disable self-attach entirely (e.g. a container without CAP_SYS_PTRACE)
 ```
 
 **Limitations:** this blocks *future* attachment; it can't retroactively catch an attacker already attached before this code runs. It does not defend against a root-level attacker reading memory through a channel that never goes through the kernel's `ptrace_may_access()` check at all -> a malicious kernel module, a hypervisor the attacker controls, or similar.
@@ -481,9 +491,9 @@ Python-source obfuscation -> everything currently in `flatten.py`, `selfhash.py`
 | Progress | Technique | Layer | Effort | Value vs. serious attacker |
 |---|---|---|---|---|
 | ✅ | Delayed / decorrelated failure reaction | Python | Low | High |
-| ✅ | ptrace self-attach (`--ptrace`, opt-in) | `.so` (Linux) | Low | High |
+| ✅ | ptrace self-attach (`--no-ptrace` to disable, on by default) | `.so` (Linux) | Low | High |
 | ✅ | Argon2id key derivation | `.so` / crypto | Low-Med | Medium |
-| ✅ | Extra python trigger primitives (`weakref`, `atexit`, `__del__`) | Python | Low | Medium |
+| ✅ | Extra python trigger primitives (`weakref`, `weakref.finalize`, `__del__`, `atexit`, `gc.callbacks`, self-rescheduling timer) | Python | Low | Medium |
 | ✅ | Continuous (not just startup) integrity checks | Python + `.so` | Medium | High |
 | ✅ | Cross-checking checks | Python | Medium | Medium-High |
 | ✅ | Explicit buffer wiping after decrypt | `.so` | Medium | High |
