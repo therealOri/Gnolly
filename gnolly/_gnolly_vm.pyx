@@ -159,6 +159,7 @@ cdef class GIRCodeObj:
     cdef public list exc_table        # list of (start, end, target, depth, lasti)
     cdef public list line_map
     cdef bytes _ichk                  # continuous-integrity baseline digest, see _code_digest()
+    cdef object _optbl                # shared _OpcodeTableGuard for this module, see _tick_and_maybe_check
 
 
 
@@ -182,6 +183,31 @@ cdef unsigned long long _CHECK_PERIOD = <unsigned long long> _secrets_mod.choice
 )
 cdef unsigned long long _tick_counter = 0
 
+# _OPTBL_CHECK_PERIOD governs _OpcodeTableGuard re-verification (below) on
+# its OWN counter, deliberately much sparser than _CHECK_PERIOD above.
+cdef unsigned long long _OPTBL_CHECK_PERIOD = <unsigned long long> _secrets_mod.choice(
+    (262144, 393216, 524288, 786432, 1048576)
+)
+cdef unsigned long long _optbl_tick_counter = 0
+
+
+cdef class _OpcodeTableGuard:
+    """
+    Retains this process's own copy of one module's reverse opcode-shuffle
+    table (gnolly.vm_isa.build_vm_shuffle_table / serialise_vm_table) for
+    the life of that module's execution, and re-verifies it against a
+    baseline digest taken the instant it was derived.
+    """
+    cdef bytes _blob       # our own copy of the 2*GIR_TABLE_SIZE-byte reverse table
+    cdef bytes _baseline   # blake2b digest of _blob, taken once, right here
+
+    def __init__(self, bytes blob not None):
+        self._blob = blob
+        self._baseline = _hashlib_mod.blake2b(blob, digest_size=16).digest()
+
+    cdef bint verify(self):
+        return _hashlib_mod.blake2b(self._blob, digest_size=16).digest() == self._baseline
+
 
 cdef bytes _code_digest(GIRCodeObj code):
     """
@@ -190,13 +216,6 @@ cdef bytes _code_digest(GIRCodeObj code):
     opcode-table-unshuffle) plus its scalar constants. Nested GIRCodeObj
     consts fold in their OWN already-computed digest rather than being
     walked again here.
-
-    Called exactly twice per code object under normal operation: once at
-    decode time (the trusted baseline, via _read_code) and then
-    repeatedly from inside the dispatch loop (_tick_and_maybe_check)
-    while it runs. Same function both times, on purpose -> what gets
-    checked at load and what gets checked at runtime can never drift
-    apart from each other.
     """
     cdef list instructions = code.instructions
     cdef list consts = code.consts
@@ -243,27 +262,30 @@ cdef bytes _code_digest(GIRCodeObj code):
 cdef inline void _tick_and_maybe_check(GIRCodeObj code):
     """
     Called once per executed instruction, from inside the hot dispatch
-    loop. This re-hashing of the code object on the 1-in-N
-    iterations where the counter lands on the period.
+    loop. Two independent counters/periods re-hashing a
+    function's own (typically small) instruction stream.
 
-    A global counter rather than per-frame, it will keep
-    accumulating across calls/recursion/generator resumes. So a
-    function that's individually too short to ever hit the threshold on
-    its own still gets checked once the process's cumulative instruction
-    count crosses it.
+    Both counters are global rather than per-frame, so they keep
+    accumulating across calls/recursion/generator resumes. A function
+    that's too short to hit a threshold on its own
+    will still get checked once the process's cumulative instruction count
+    crosses it.
     """
-    global _tick_counter
+    global _tick_counter, _optbl_tick_counter
+
     _tick_counter += 1
-    if (_tick_counter % _CHECK_PERIOD) != 0:
-        return
-    if code._ichk is None:
-        return
-    if _code_digest(code) != code._ichk:
-        _os_mod._exit(1)
+    if (_tick_counter % _CHECK_PERIOD) == 0:
+        if code._ichk is not None and _code_digest(code) != code._ichk:
+            _os_mod._exit(1)
+
+    _optbl_tick_counter += 1
+    if (_optbl_tick_counter % _OPTBL_CHECK_PERIOD) == 0:
+        if code._optbl is not None and not (<_OpcodeTableGuard> code._optbl).verify():
+            _os_mod._exit(1)
 
 
 
-def _read_const(_Reader r, dict table):
+def _read_const(_Reader r, dict table, object optbl):
     cdef int tag = r.read_u8()
     cdef unsigned long long n, nbytes
     cdef unsigned char sign
@@ -295,16 +317,16 @@ def _read_const(_Reader r, dict table):
         return r.read_bytes(<Py_ssize_t>n)
     if tag == K_TUPLE:
         n = r.read_uvarint()
-        return tuple(_read_const(r, table) for _ in range(n))
+        return tuple(_read_const(r, table, optbl) for _ in range(n))
     if tag == K_FROZENSET:
         n = r.read_uvarint()
-        return frozenset(_read_const(r, table) for _ in range(n))
+        return frozenset(_read_const(r, table, optbl) for _ in range(n))
     if tag == K_CODE:
-        return _read_code(r, table)
+        return _read_code(r, table, optbl)
     raise ValueError("unknown GIR constant tag %d" % tag)
 
 
-def _read_code(_Reader r, dict table):
+def _read_code(_Reader r, dict table, object optbl):
     cdef GIRCodeObj code = GIRCodeObj()
     code.argcount = <int>r.read_uvarint()
     code.posonlyargcount = <int>r.read_uvarint()
@@ -323,7 +345,7 @@ def _read_code(_Reader r, dict table):
     code.cellfree = code.cellvars + code.freevars
 
     cdef unsigned long long n_consts = r.read_uvarint()
-    code.consts = [_read_const(r, table) for _ in range(n_consts)]
+    code.consts = [_read_const(r, table, optbl) for _ in range(n_consts)]
 
     cdef unsigned long long n_instr = r.read_uvarint()
     cdef list instructions = []
@@ -364,6 +386,9 @@ def _read_code(_Reader r, dict table):
         line_map.append((<long long>idx, prev_line))
     code.line_map = line_map
 
+    # Shared across every GIRCodeObj decoded from this same module
+    code._optbl = optbl
+
     # Baseline snapshot, taken the instant this code object is fully
     # decoded -> the earliest point its post-table-unshuffle
     # opcodes exist in memory at all. If any divergence from this snapshot is found
@@ -388,10 +413,20 @@ def deserialize_vm_blob(blob, table_blob):
     """
     if len(table_blob) < GIR_TABLE_SIZE * 2:
         raise ValueError("vm opcode table too short")
+
+    # Our own, immutable copy -> independent of whatever the caller does
+    # to table_blob afterward, including deliberately wiping a bytearray
+    # wrapper once decode is done.
+    # This copy and not the caller's buffer, is what _OpcodeTableGuard retains
+    # and re-verifies from inside run_frame()'s dispatch loop for the
+    # rest of this module's execution.
+    cdef bytes table_bytes = bytes(table_blob[:GIR_TABLE_SIZE * 2])
+    cdef _OpcodeTableGuard optbl = _OpcodeTableGuard(table_bytes)
+
     cdef dict table = {}
     cdef Py_ssize_t ti
     for ti in range(GIR_TABLE_SIZE):
-        table[ti] = (table_blob[2 * ti] << 8) | table_blob[2 * ti + 1]
+        table[ti] = (table_bytes[2 * ti] << 8) | table_bytes[2 * ti + 1]
     if not blob:
         raise ValueError("empty GIR blob")
     if blob[0] != GIR_FORMAT_VERSION:
@@ -399,7 +434,7 @@ def deserialize_vm_blob(blob, table_blob):
             "unsupported GIR format version %d (expected %d)" % (blob[0], GIR_FORMAT_VERSION)
         )
     cdef _Reader r = _Reader(blob, 1)   # skip format-version byte
-    return _read_code(r, table)
+    return _read_code(r, table, optbl)
 
 
 # ---------------------------------------------------------------------------
