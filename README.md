@@ -499,7 +499,7 @@ Python-source obfuscation -> everything currently in `flatten.py`, `selfhash.py`
 | ✅ | Explicit buffer wiping after decrypt | `.so` | Medium | High |
 | ⏳ | aeskeyfind-class mitigation | `.so` | High | High |
 | ⏳ | Decoy-blob payload scattering ("lattice") | Python / stub layout | High | Medium |
-| ⏳ | In-VM opcode table re-verification | `.so` | High | Medium-High |
+| ✅ | In-VM opcode table re-verification | `.so` | High | Medium-High |
 
 > After some hardening, I want to work on antitamper, antidebug, and improving that side of the project. Both .so and in python.
 
