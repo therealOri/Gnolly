@@ -39,6 +39,7 @@ Payload layout (after decrypt + decompress)
 
 import struct
 import sys
+import os
 import hashlib
 import zlib
 import lzma
@@ -412,6 +413,67 @@ cdef extern from *:
     #endif
     }
 
+    /* ── aeskeyfind-style memory-forensics mitigation:
+
+       gnolly_aes256_key_schedule() below performs the full standard
+       expansion (SubWord/RotWord/Rcon over 8 key words -> 60 round-key
+       words) so that gnolly_deploy_chaff() can mint any number of
+       structurally real AES-256 schedules from throwaway random seeds.
+       Each one is indistinguishable from the genuine schedule by
+       structure alone. aeskeyfind's structural test cannot tell real
+       from decoy, and only trial-decrypting the actual ciphertext against
+       each candidate can. One confirmed hit becomes 1-in-(N+1) guesswork.
+    */
+       
+    static const unsigned char gnolly_sbox[256] = {
+        0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+        0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+        0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+        0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+        0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+        0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+        0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+        0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+        0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+        0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+        0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+        0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+        0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+        0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+        0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+        0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+    };
+
+    /* FIPS-197 AES-256 key expansion: Nk=8, Nr=14, Nb=4 -> 60 round-key
+       words (240 bytes). key32 and out240 must be distinct, non-NULL,
+       exactly 32 and 240 bytes respectively. */
+    static void gnolly_aes256_key_schedule(const unsigned char *key32, unsigned char *out240) {
+        static const unsigned char rcon[8] = {0x00,0x01,0x02,0x04,0x08,0x10,0x20,0x40};
+        unsigned char w[60][4];
+        int i;
+        for (i = 0; i < 8; i++) {
+            w[i][0] = key32[4*i + 0];
+            w[i][1] = key32[4*i + 1];
+            w[i][2] = key32[4*i + 2];
+            w[i][3] = key32[4*i + 3];
+        }
+        for (i = 8; i < 60; i++) {
+            unsigned char t0 = w[i-1][0], t1 = w[i-1][1], t2 = w[i-1][2], t3 = w[i-1][3];
+            if (i % 8 == 0) {
+                unsigned char tmp = t0;
+                t0 = gnolly_sbox[t1]; t1 = gnolly_sbox[t2]; t2 = gnolly_sbox[t3]; t3 = gnolly_sbox[tmp];
+                t0 ^= rcon[i/8];
+            } else if (i % 8 == 4) {
+                t0 = gnolly_sbox[t0]; t1 = gnolly_sbox[t1]; t2 = gnolly_sbox[t2]; t3 = gnolly_sbox[t3];
+            }
+            w[i][0] = w[i-8][0] ^ t0;
+            w[i][1] = w[i-8][1] ^ t1;
+            w[i][2] = w[i-8][2] ^ t2;
+            w[i][3] = w[i-8][3] ^ t3;
+        }
+        memcpy(out240, w, 240);
+    }
+
     #if defined(_WIN32)
     /* Installed by gnolly_disable_core_dumps() below. Runs ahead of
        Windows Error Reporting's own handler -> terminate immediately
@@ -450,6 +512,7 @@ cdef extern from *:
     int  gnolly_unlock_mem(void *ptr, size_t length)
     void gnolly_mark_undumpable(void *ptr, size_t length)
     void gnolly_disable_core_dumps()
+    void gnolly_aes256_key_schedule(const unsigned char *key32, unsigned char *out240)
 
 
 from cpython.buffer cimport Py_buffer, PyObject_GetBuffer, PyBuffer_Release, PyBUF_WRITABLE
@@ -522,6 +585,63 @@ cdef void _unlock(object buf):
         gnolly_unlock_mem(view.buf, <size_t>view.len)
     finally:
         PyBuffer_Release(&view)
+
+
+# ── aeskeyfind mitigation: key-schedule chaff ──────────────────────────────────
+# Makes a passive memory-image scan for AES-256
+# round-key schedules return several structurally valid
+# candidates instead of one, with the real one and the decoys sharing an
+# identical alloc/mlock/undumpable/wipe lifetime.
+cdef int _CHAFF_COUNT = 20  # cost: ~20 * (240B alloc + one schedule expansion) per run
+
+cdef bytearray _make_decoy_schedule():
+    """One throwaway-seed AES-256 schedule, structurally real, key unknown to
+    anything (seed is never retained)."""
+    cdef bytearray seed = bytearray(os.urandom(32))
+    cdef bytearray out  = bytearray(240)
+    cdef Py_buffer seed_view, out_view
+    if PyObject_GetBuffer(seed, &seed_view, PyBUF_WRITABLE) != 0:
+        PyErr_Clear()
+        return out
+    if PyObject_GetBuffer(out, &out_view, PyBUF_WRITABLE) != 0:
+        PyErr_Clear()
+        PyBuffer_Release(&seed_view)
+        return out
+    try:
+        gnolly_aes256_key_schedule(<const unsigned char*>seed_view.buf, <unsigned char*>out_view.buf)
+    finally:
+        PyBuffer_Release(&seed_view)
+        PyBuffer_Release(&out_view)
+    _wipe(seed)
+    return out
+
+
+cdef list _deploy_chaff(int n=-1):
+    """
+    Mint n decoy AES-256 schedules, each mlock'd + excluded from core dumps.
+    We call this before the real key/schedule exists and wipe the result (`_wipe_chaff`)
+    at the exact same point the real derived key is wiped, so both share one lifetime window.
+    """
+    if n < 0:
+        n = _CHAFF_COUNT
+    cdef list bufs = []
+    cdef int i
+    cdef bytearray buf
+    for i in range(n):
+        buf = _make_decoy_schedule()
+        _lock(buf)
+        bufs.append(buf)
+    return bufs
+
+
+cdef void _wipe_chaff(list bufs):
+    cdef bytearray b
+    if not bufs:
+        return
+    for b in bufs:
+        _wipe(b)
+        _unlock(b)
+    bufs.clear()
 
 
 # ── sys.monitoring blackout ───────────────────────────────────────────────────
@@ -613,6 +733,11 @@ def gnolly_run(
         sys.exit(1)
     cdef object _blackout_state = _monitoring_blackout_enter()
 
+    # aeskeyfind mitigation: decoy schedules go live before any real key
+    # material exists, and come down with the real derived key below -> any
+    # memory image taken anywhere in that window sees both.
+    cdef list _chaff = _deploy_chaff()
+
     # ── 1. Normalise key into a buffer we own and can wipe ──────────────────
     cdef bytearray key_buf
     if isinstance(key_input, (bytes, bytearray)):
@@ -650,6 +775,7 @@ def gnolly_run(
     except ValueError:
         _wipe(derived_buf); _unlock(derived_buf)
         _wipe(plaintext_buf); _unlock(plaintext_buf)
+        _wipe_chaff(_chaff)
         sys.exit(1)
     finally:
         # Drop pycryptodome's cipher object (and whatever internal key-
@@ -659,6 +785,7 @@ def gnolly_run(
         _wipe(derived_buf)
         _unlock(derived_buf)
         derived_buf = None
+        _wipe_chaff(_chaff)
 
     # ── 4. Decompress ─────────────────────────────────────────────────────────
     # zlib/lzma/bz2 gives us an immutable bytes with no way to decompress
@@ -708,7 +835,7 @@ def gnolly_run(
             '__package__':  None,
             '__spec__':     None,
         }
-    
+
     try:
         _gvm_exec_module(gir_blob_buf, table_blob_buf, globs)
     finally:
