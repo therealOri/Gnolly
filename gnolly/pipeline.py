@@ -20,8 +20,13 @@ Code layout (after AES-GCM decrypt + decompress):
     b'\x01'                     VM-mode flag (1 byte)
     u32_BE(gir_len)             GIR blob length
     <gir_blob>                  shuffled GIR bytecode
-    u32_BE(table_len)           reverse table length (always 256)
-    <table_blob>                256-byte reverse opcode table
+
+    The GIR opcode reverse table is NOT shipped in this code. It is now a
+    deterministic function of the fully-folded decryption key.
+    (see gnolly.vm_isa.build_vm_shuffle_table)
+    Shipping a precomputed copy bought us no extra protection 
+    (an attacker who has the key can rederive the table trivially either way) 
+    and added ~130KB of incompressible bytes per file.
 """
 from __future__ import annotations
 import hashlib
@@ -55,7 +60,7 @@ ensure_core(verbose=False)
 _MAGIC_VER_LEN = len(_MAGIC) + len(_VERSION)
 _HEADER_LEN    = _MAGIC_VER_LEN + _SALT_LEN + _IV_LEN + _TAG_LEN
 
-# VM mode flag byte prepended to the payload
+# VM mode flag byte prepended to the payload.
 _VM_MODE_BYTE = b'\x01'
 
 
@@ -231,10 +236,32 @@ def protect(
         if (mangle_names or obf_strings or inject_dead or obf_numbers) \
         else source
 
+    # Key folding (binding + integrity + poison), is now moved ahead of VM translate
+    # (it used to run in Stage 5) so its result -> _effective_password -> is
+    # available to derive the VM opcode-shuffle key below. None of this
+    # folding depends on anything produced by VM translate/compress/encrypt,
+    # so reordering it here is safe; it must simply run before both of its
+    # consumers (vm_key here, and encrypt() in Stage 5).
+    _effective_password = password
+    if machine_fingerprint is not None:
+        import hmac as _hmac
+        _effective_password = _hmac.new(
+            machine_fingerprint, password, __import__('hashlib').sha256
+        ).digest()
+    runtime_hashes = collect_runtime_hashes()
+    _effective_password = fold_integrity(_effective_password, runtime_hashes)
+    if decorrelate_checks:
+        # Mirror of the runtime poison fold (see gnolly.poison and
+        # stub.py) with the accumulator fixed at 0 -> nothing has
+        # failed yet at build time by definition.
+        _effective_password = fold_poison(_effective_password, poison_value=0)
+
     # Stage 2+3: VM translate + GIR opcode shuffle
-    # The VM key is derived from password so the shuffle is file-unique.
+    # The VM key is derived from the fully-folded password (not the raw
+    # one) so that gnolly_run(), which only ever holds the folded key at
+    # runtime, can re-derive this exact same vm_key itself.
     _log("Stage 2/5  VM translate + GIR opcode shuffle …")
-    vm_key = hashlib.sha256(b"gnolly-vm-key:" + password).digest()
+    vm_key = hashlib.sha256(b"gnolly-vm-key:" + _effective_password).digest()
 
     def _vm_fallback(exc: VMUnsupportedError) -> None:
         # No fallback allowed -> report and abort.
@@ -258,37 +285,24 @@ def protect(
         # guard here in case caller overrides fallback_fn.
         sys.exit(1)
 
-    gir_blob, table_blob = result
+    gir_blob = result
 
     # Stage 4: Pack VM payload + compress
     _log("Stage 4/5  Compression …")
-    # Layout: VM_MODE_FLAG | u32_BE(gir_len) | gir_blob | u32_BE(table_len) | table_blob
-    gir_len   = len(gir_blob)
-    table_len = len(table_blob)
+    # Layout: VM_MODE_FLAG | u32_BE(gir_len) | gir_blob
+    gir_len = len(gir_blob)
     packed = (
         _VM_MODE_BYTE
         + struct.pack(">I", gir_len)
         + gir_blob
-        + struct.pack(">I", table_len)
-        + table_blob
     )
     compressed = compress(packed)
 
     # Stage 5: Encrypt
+    # _effective_password was already folded (binding + integrity + poison)
+    # above, before VM translate, so vm_key and this encryption key are
+    # derived from the exact same folded material.
     _log("Stage 5/5  Encryption (AES-256-GCM / Argon2id) …")
-    _effective_password = password
-    if machine_fingerprint is not None:
-        import hmac as _hmac
-        _effective_password = _hmac.new(
-            machine_fingerprint, password, __import__('hashlib').sha256
-        ).digest()
-    runtime_hashes = collect_runtime_hashes()
-    _effective_password = fold_integrity(_effective_password, runtime_hashes)
-    if decorrelate_checks:
-        # Mirror of the runtime poison fold (see gnolly.poison and
-        # stub.py) with the accumulator fixed at 0 -> nothing has
-        # failed yet at build time by definition.
-        _effective_password = fold_poison(_effective_password, poison_value=0)
     encrypted_blob = encrypt(compressed, _effective_password)
 
     salt = encrypted_blob[_MAGIC_VER_LEN            : _MAGIC_VER_LEN + _SALT_LEN]
