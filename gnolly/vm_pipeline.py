@@ -12,21 +12,26 @@ protect-time (developer machine):
   2. compile() -> CPython code object.
   3. vm_translate.translate_module()  ->  GIRCode tree.
   4. vm_serialize.serialize_module()  ->  raw bytes.
-  5. Derive per-file VM opcode shuffle table from the session key.
+  5. Derive per-file VM opcode shuffle table (forward + reverse) from the
+     session key -> only the forward half is used here.
   6. Apply the forward table to every instruction byte in the blob.
   7. Encrypt the shuffled blob (AES-GCM, same key ladder as before).
-  8. Store encrypted blob + reverse table in the .gno output bundle
-     alongside the module stub.
+  8. Store the encrypted blob in the .gno output bundle alongside the
+     module stub. The reverse table is NOT stored: it is a deterministic
+     function of the same key, so load-time re-derives it instead of
+     shipping a precomputed (and incompressible, ~130KB) copy.
 
 load-time (end user machine):
-  The stub calls vm_exec.vm_exec_module(blob, table_blob, globs)
-  which runs inside _gnolly_vm (Cython, compiled extension -> no fallback).
-  The interpreter un-shuffles opcodes on the fly during deserialisation.
+  _gnolly_core.pyx's gnolly_run() re-derives the reverse table from the
+  folded decryption key (mirroring gnolly.vm_isa.build_vm_shuffle_table
+  exactly) and calls _gnolly_vm.vm_exec_module(blob, table_blob, globs),
+  which runs inside _gnolly_vm. The interpreter un-shuffles opcodes on the fly during
+  deserialisation, same as before -> only where the table_blob comes from has changed.
 """
 from __future__ import annotations
 import os
 
-from .vm_isa import build_vm_shuffle_table, serialise_vm_table
+from .vm_isa import build_vm_shuffle_table
 from .vm_translate import translate_module, VMUnsupportedError
 from .vm_serialize import serialize_module
 
@@ -38,12 +43,16 @@ def protect_with_vm(
     *,
     fallback_fn=None,
     inject_junk: bool = True,
-) -> tuple[bytes, bytes] | None:
+) -> bytes | None:
     """
     Attempt to translate source through the GIR VM pipeline.
 
-    Returns (shuffled_gir_blob, reverse_table_blob) on success.
-    Returns None if the module uses unsupported constructs.
+    Returns the shuffled_gir_blob on success. Returns None if the module
+    uses unsupported constructs.
+
+    The reverse opcode table is intentionally not computed/returned here
+    beyond what build_vm_shuffle_table needs internally -> it is a pure
+    function of `key`, and load-time re-derives it itself rather than having one shipped.
 
     key:
         per-file encryption key (used to derive the VM shuffle table).
@@ -64,10 +73,9 @@ def protect_with_vm(
         raise  # propagate compile errors normally
 
     raw_blob = serialize_module(gir)
-    forward, reverse = build_vm_shuffle_table(key)
+    forward, _reverse = build_vm_shuffle_table(key)
     shuffled = _apply_forward_table(raw_blob, gir, forward)
-    table_blob = serialise_vm_table(reverse)
-    return shuffled, table_blob
+    return shuffled
 
 
 def _apply_forward_table(raw_blob: bytes, gir, forward: dict[int, int]) -> bytes:
