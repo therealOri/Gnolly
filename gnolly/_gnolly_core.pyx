@@ -32,9 +32,12 @@ Payload layout (after decrypt + decompress)
   u32_BE(gir_len)       GIR blob length
   <gir_blob>            shuffled GIR bytecode (per-file opcode permutation,
                          see vm_translate.py / vm_serialize.py)
-  u32_BE(table_len)     reverse opcode table length (always 131072)
-  <table_blob>          131072-byte (2*65536, big-endian u16 pairs) reverse
-                         opcode table for the GIR shuffle
+
+The 65536-entry GIR reverse opcode table is NOT part of this code.
+gnolly_run() re-derives it itself, right here, from the same folded key
+it already holds for AES-GCM decryption.
+it is a pure function of that key, so shipping a precomputed copy
+provided no extra protection and added ~130KB of incompressible bytes per file.
 """
 
 import struct
@@ -75,6 +78,62 @@ cdef bytes _argon2_key(bytes password, bytes salt):
         hash_len=32,
         type=_Argon2Type.ID,
     )
+
+
+# ── VM opcode table re-derivation ───────────────────────────────────────────
+# Re-derives the GIR reverse opcode table from the folded decryption key
+# instead of reading it from the code.
+#
+# NOTE: this MUST mirror gnolly.vm_isa.build_vm_shuffle_table() and
+# serialise_vm_table() exactly. -> protect-time (vm_isa.py,
+# plain Python) and run-time (here, compiled) must always agree, the same
+# way GIR_TABLE_SIZE itself must already be kept in sync between
+# vm_isa.py and _gnolly_vm.pyx. If either algorithm ever changes, the
+# other must change with it in the same commit, and GNOLLY_VM_KEY_DOMAIN/
+# the VM-mode flag byte should be bumped so mismatched old/new builds
+# fail loudly instead of silently deriving the wrong table.
+cdef int _GIR_TABLE_SIZE = 65536
+cdef bytes _VM_KEY_DOMAIN = b"gnolly-vm-key:"
+cdef bytes _VM_TABLE_DOMAIN = b"gnolly-vm-opcode:"
+
+cdef void _derive_vm_reverse_table(bytes folded_key, bytearray out):
+    """
+    folded_key: the SAME fully-folded key gnolly_run() uses for Argon2id
+    (binding + integrity + poison already applied at protect-time and
+    reconstructed identically here before this is called).
+
+    out: a caller-owned, already-_lock()'d bytearray of exactly
+    2*_GIR_TABLE_SIZE bytes, filled in place.
+
+    Fills `out` with the reverse table, big-endian u16 pairs,
+    index = shuffled value -> value = real GIR opcode. Identical in
+    shape and content to what gnolly.vm_isa.serialise_vm_table()
+    produces, just computed here instead of parsed from the code.
+    """
+    cdef bytes vm_key = hashlib.sha256(_VM_KEY_DOMAIN + folded_key).digest()
+    cdef bytes stream = hashlib.shake_256(_VM_TABLE_DOMAIN + vm_key).digest(2 * _GIR_TABLE_SIZE)
+
+    cdef list perm = list(range(_GIR_TABLE_SIZE))
+    cdef int i, j, word, idx = 0
+    cdef int tmp
+    for i in range(_GIR_TABLE_SIZE - 1, 0, -1):
+        word = struct.unpack_from(">H", stream, idx)[0]
+        idx += 2
+        j = word % (i + 1)
+        tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp
+
+    # forward[gir_opcode] = perm[gir_opcode]; reverse[perm[gir_opcode]] = gir_opcode.
+    cdef int shuffled_value
+    for i in range(_GIR_TABLE_SIZE):
+        shuffled_value = perm[i]
+        out[2 * shuffled_value]     = (i >> 8) & 0xFF
+        out[2 * shuffled_value + 1] = i & 0xFF
+
+    # vm_key and stream are both key-adjacent (vm_key is a one-way hash
+    # of the real key; stream is derived from vm_key) -> wipe them for
+    # the same reason _derived_raw gets a best-effort wipe below.
+    _wipe_bytes_unsafe(vm_key)
+    _wipe_bytes_unsafe(stream)
 
 
 # ── Decompression ─────────────────────────────────────────────────────────────
@@ -424,7 +483,7 @@ cdef extern from *:
        from decoy, and only trial-decrypting the actual ciphertext against
        each candidate can. One confirmed hit becomes 1-in-(N+1) guesswork.
     */
-       
+
     static const unsigned char gnolly_sbox[256] = {
         0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
         0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
@@ -712,8 +771,11 @@ def gnolly_run(
         b'\\x01'              VM-mode flag
         u32_BE(gir_len)      GIR blob length
         <gir_blob>           shuffled GIR bytecode
-        u32_BE(table_len)    reverse table length (131072)
-        <table_blob>         131072-byte reverse opcode table (u16 pairs)
+
+    The GIR reverse opcode table is not part of this code -> it is
+    re-derived right here from the same folded key used for AES-GCM
+    decryption, since it's a pure function of that key
+    and shipping a precomputed copy made the final output larger with no extra protection.
 
     caller_globals : when provided (module_mode stubs, e.g. protected
         package/wheel submodules), the decoded output executes directly into
@@ -746,6 +808,12 @@ def gnolly_run(
         key_buf = bytearray(key_input.encode('utf-8'))
     _lock(key_buf)
 
+    # ── 1b. Re-derive the GIR reverse opcode table from this same folded
+    # key, before it's wiped.
+    cdef bytearray table_blob_buf = bytearray(2 * _GIR_TABLE_SIZE)
+    _lock(table_blob_buf)
+    _derive_vm_reverse_table(bytes(key_buf), table_blob_buf)
+
     # ── 2. KDF ────────────────────────────────────────────────────────────────
     cdef bytes _derived_raw = _argon2_key(bytes(key_buf), salt)  # argon2 needs `bytes` in
     _wipe(key_buf)
@@ -775,6 +843,7 @@ def gnolly_run(
     except ValueError:
         _wipe(derived_buf); _unlock(derived_buf)
         _wipe(plaintext_buf); _unlock(plaintext_buf)
+        _wipe(table_blob_buf); _unlock(table_blob_buf); table_blob_buf = None
         _wipe_chaff(_chaff)
         sys.exit(1)
     finally:
@@ -803,17 +872,16 @@ def gnolly_run(
     _lock(decompressed)
 
     # ── 5. Unpack VM-mode payload ─────────────────────────────────────────────
-    # Layout: VM_FLAG(1) | u32(gir_len) | gir_blob | u32(table_len) | table_blob
+    # Layout: VM_FLAG(1) | u32(gir_len) | gir_blob
     if len(decompressed) < 1 or decompressed[0:1] != b'\x01':
         # Not a VM-mode payload/code -> refuse to execute
         _wipe(decompressed); _unlock(decompressed)
+        _wipe(table_blob_buf); _unlock(table_blob_buf); table_blob_buf = None
         sys.exit(1)
 
-    cdef unsigned int gir_len, table_len
-    gir_len,   = struct.unpack_from('>I', decompressed, 1)
-    cdef bytearray gir_blob_buf   = decompressed[5 : 5 + gir_len]
-    table_len, = struct.unpack_from('>I', decompressed, 5 + gir_len)
-    cdef bytearray table_blob_buf = decompressed[9 + gir_len : 9 + gir_len + table_len]
+    cdef unsigned int gir_len
+    gir_len, = struct.unpack_from('>I', decompressed, 1)
+    cdef bytearray gir_blob_buf = decompressed[5 : 5 + gir_len]
     _wipe(decompressed)
     _unlock(decompressed)
     decompressed = None
