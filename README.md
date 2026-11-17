@@ -48,48 +48,11 @@ __ __
 
 ## What Gnolly does
 
-When you protect a file, Gnolly runs your code through seven stages:
+When you protect a file, this is how Gnolly works:
 
-```
-your_script.py
-    │
-    ├─ [1] AST obfuscation      —   name mangling, keyed string/bytes/float encoding
-    │                               (multiple independently-rolled encoding dialects),
-    │                               multi-family integer encoding (XOR / additive /
-    │                               mul-div / shift identities), dead-code and decoy-
-    │                               structure injection, bogus class hierarchies,
-    │                               expression aliasing, docstring removal
-    │
-    ├─ [2] GIR VM translation   —   source -> Gnolly Intermediate Representation
-    │                               (custom bytecode format; CPython opcodes
-    │                               never exist at runtime)
-    │
-    ├─ [3] VM opcode shuffle    —   per-file permutation over the full 65536-entry
-    │                               (16-bit) GIR opcode space
-    │
-    ├─ [4] Compression          —   zlib / lzma / bz2, best result is used
-    │
-    ├─ [5] Encryption           —   AES-256-GCM + Argon2id
-    │                               (t=3, m=64MiB, p=4, random salt+IV per file)
-    │
-    ├─ [6] Custom encoding      —   per-file alphabet keyed from password + random
-    │                               salt, unique every run
-    │
-    └─ [7] Stub generation      —   control-flow-flattened, minified, packed,
-              │                     self-hash-verified, obfuscated loader script
-              │
-              └─ your_script.gnolly.py   <-  distribute this
-```
+<img width="1760" height="1480" alt="gnolly_architecture" src="https://github.com/user-attachments/assets/e8c977eb-eb25-4afa-ab6c-0ded253b7db0" />
 
-The output is a standalone `.py` that asks for a key before running. No source text, no readable bytecode, no embedded key. Two compiled C extensions (`_gnolly_core.so` for decryption & core functionality, `_gnolly_vm.so` for execution) perform all of the work in native machine code. **Both are required at runtime.**
-
-### True VM protection
-
-Protected code is never executed by CPython's eval loop (`ceval.c`). It runs entirely inside `_gnolly_vm.pyx`, a full bytecode interpreter implemented in Cython with its own stack machine, frame objects, and dispatch loop. This means:
-
-- `sys.settrace` / `sys.setprofile` fire **zero events** for protected code.
-- `dis`, `uncompyle6`, `decompile3`, and `pycdc` have no foothold, the on-disk format is GIR, not CPython bytecode
-- GIR opcodes are shuffled per-file using a key-derived permutation; two files with identical source produce different binary blobs
+The output is a standalone `.py` that asks for a key before running. No source text, no readable bytecode, no embedded key. The two compiled C extensions perform all of the work in native machine code. & **Both are required at runtime.**
 __ __
 
 <br>
@@ -99,7 +62,7 @@ __ __
 ### Install
 
 ```bash
-pip install pycryptodome cython
+pip install pycryptodome cython argon2-cffi
 git clone https://github.com/therealOri/Gnolly
 cd Gnolly
 ./make.sh
@@ -244,6 +207,8 @@ gnolly protect <input.py> [output.py] [options]
   --verbose-errors        Emit error messages from the stub on failure (dev only)
 ```
 
+<br>
+
 ### `gnolly protect-dir`
 
 Protect an entire directory of files, recursively.
@@ -254,6 +219,9 @@ gnolly protect-dir <input_dir> [output_dir] [options]
   --exclude GLOB [...]    Glob patterns to skip (e.g. "tests/*" "*.pyi")
   (all protect options above also apply)
 ```
+> This will maybe take awhile depending on how recursive and how many files are being protected.
+
+<br>
 
 ### `gnolly protect-wheel`
 
@@ -274,6 +242,8 @@ gnolly protect-wheel <input_dir> [output_dir] --name NAME --version VERSION [opt
 ```
 > The protected package is importable like any normal package; protected modules execute into their own `__dict__` rather than a `__main__` namespace.
 
+<br>
+
 ### `gnolly keygen`
 
 Generate a new key without protecting anything.
@@ -285,6 +255,8 @@ gnolly keygen [keyfile] [options]
   --for-file TEXT         Which script this key belongs to (informational)
 ```
 
+<br>
+
 ### `gnolly fingerprint`
 
 Print a machine fingerprint for use with `--bind-fp`.
@@ -294,9 +266,9 @@ gnolly fingerprint
 # prints: 3a7f91bc...
 # Use with: gnolly protect --bind-fp 3a7f91bc... your_script.py
 ```
+__ __
 
----
-
+<br>
 <br>
 
 ## Python API
@@ -344,7 +316,6 @@ protect(
     pack: bool = True,
     one_line_output: bool = True,
     self_hash: bool = True,
-    module_mode: bool = False,
     bogus_hierarchy: bool = True,
     alias_exprs: bool = True,
     decorrelate_checks: bool = True,
@@ -498,7 +469,6 @@ Python-source obfuscation -> everything currently in `flatten.py`, `selfhash.py`
 | ✅ | Cross-checking checks | Python | Medium | Medium-High |
 | ✅ | Explicit buffer wiping after decrypt | `.so` | Medium | High |
 | ✅ | aeskeyfind-class mitigation | `.so` | High | High |
-| ⏳ | Decoy-blob payload scattering ("lattice") | Python / stub layout | High | Medium |
 | ✅ | In-VM opcode table re-verification | `.so` | High | Medium-High |
 
 > After some hardening, I want to work on antitamper, antidebug, and improving that side of the project. Both .so and in python.
