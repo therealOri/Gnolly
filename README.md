@@ -48,7 +48,7 @@ __ __
 
 ## What Gnolly does
 
-When you protect a file, this is how Gnolly works:
+When you protect & run a file, this is how Gnolly works:
 
 <img width="1760" height="1480" alt="gnolly_architecture" src="https://github.com/user-attachments/assets/e8c977eb-eb25-4afa-ab6c-0ded253b7db0" />
 
